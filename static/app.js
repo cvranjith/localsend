@@ -97,13 +97,25 @@ function renderPartners() {
 }
 
 function partnerHTML(p) {
-  const status       = partnerStatus[p.id] || {};
-  const online       = status.online;
-  const lastSeenSec  = status.last_seen_sec;
-  const recentlyActive = !online && lastSeenSec != null && lastSeenSec < 120;
+  const status      = partnerStatus[p.id] || {};
+  const online      = status.online;
+  const lastSeenSec = status.last_seen_sec;
 
-  const dotCls = online ? "online" : recentlyActive ? "recent" : (online === false ? "offline" : "");
-  const dotTip = online ? "online" : recentlyActive ? `active ${lastSeenSec}s ago` : "offline";
+  let dotCls, dotTip;
+  if (p.reachable) {
+    // Server mode: ping result is meaningful
+    dotCls = online ? "online" : (online === false ? "offline" : "");
+    dotTip = online ? "online" : "offline";
+  } else {
+    // Client mode: ping always fails (expected) — use last_seen instead
+    if (lastSeenSec != null && lastSeenSec < 10) {
+      dotCls = "online";  dotTip = "active";
+    } else if (lastSeenSec != null && lastSeenSec < 120) {
+      dotCls = "recent";  dotTip = `active ${lastSeenSec}s ago`;
+    } else {
+      dotCls = "";  dotTip = lastSeenSec != null ? `last seen ${Math.round(lastSeenSec/60)}m ago` : "waiting for contact";
+    }
+  }
 
   const modeLabel = p.reachable ? "server" : "client";
   const modeBadge = p.reachable
@@ -184,12 +196,21 @@ async function pingAll() {
       const status = res[p.id] || {};
       const online = status.online;
       const lastSeenSec = status.last_seen_sec;
-      const recentlyActive = !online && lastSeenSec != null && lastSeenSec < 120;
-      setPartnerDot(
-        p.id,
-        online ? "online" : recentlyActive ? "recent" : "offline",
-        online ? "online" : recentlyActive ? `active ${lastSeenSec}s ago` : "offline"
-      );
+      let cls, tip;
+      if (p.reachable) {
+        cls = online ? "online" : "offline";
+        tip = online ? "online" : "offline";
+      } else {
+        // Client mode: never show red — ping failure is expected
+        if (lastSeenSec != null && lastSeenSec < 10) {
+          cls = "online";  tip = "active";
+        } else if (lastSeenSec != null && lastSeenSec < 120) {
+          cls = "recent";  tip = `active ${lastSeenSec}s ago`;
+        } else {
+          cls = "";  tip = lastSeenSec != null ? `last seen ${Math.round(lastSeenSec/60)}m ago` : "waiting for contact";
+        }
+      }
+      setPartnerDot(p.id, cls, tip);
     });
   } catch {}
 }
