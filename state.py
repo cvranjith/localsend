@@ -26,6 +26,7 @@ class AppState:
         self.file_semaphore = asyncio.Semaphore(6)
         self._receiving = False
         self.sse_queues: list[asyncio.Queue] = []
+        self.active_tasks: dict[str, asyncio.Task] = {}  # transfer_id → task
 
     # ── config ────────────────────────────────────────────────────────────────
 
@@ -58,13 +59,14 @@ class AppState:
     def _save_partners(self):
         PARTNERS_FILE.write_text(json.dumps(self.partners, indent=2))
 
-    def add_partner(self, name: str, ip: str, port: int, remote_device_id: str) -> dict:
+    def add_partner(self, name: str, ip: str, port: int, remote_device_id: str, reachable: bool = False) -> dict:
         p = {
             "id": str(uuid.uuid4()),
             "name": name,
             "ip": ip,
             "port": port,
             "device_id": remote_device_id,
+            "reachable": reachable,  # True = we can push; False = pull-only
         }
         self.partners.append(p)
         self._save_partners()
@@ -82,6 +84,9 @@ class AppState:
 
     def get_partner_by_ip(self, ip: str) -> dict | None:
         return next((p for p in self.partners if p.get("ip") == ip), None)
+
+    def get_partner_by_ip_port(self, ip: str, port: int) -> dict | None:
+        return next((p for p in self.partners if p.get("ip") == ip and p.get("port") == port), None)
 
     # ── outbox ────────────────────────────────────────────────────────────────
 

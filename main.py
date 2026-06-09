@@ -99,31 +99,35 @@ class AddPartner(BaseModel):
     name: str
     ip: str
     port: int
-    device_id: Optional[str] = None  # can be provided manually if auto-discovery fails
 
 
 @app.post("/api/partners")
 async def add_partner(body: AddPartner):
-    remote_device_id = body.device_id.strip() if body.device_id else None
-    remote_name = body.name.strip()
+    if state.get_partner_by_ip_port(body.ip, body.port):
+        raise HTTPException(409, f"Partner at {body.ip}:{body.port} already exists")
 
-    if not remote_device_id:
-        # Try auto-discovery; if unreachable, save anyway (manual pairing)
-        async with httpx.AsyncClient(timeout=5) as client:
-            try:
-                resp = await client.get(f"http://{body.ip}:{body.port}/api/peer/hello")
-                resp.raise_for_status()
-                remote = resp.json()
-                remote_device_id = remote.get("device_id")
-                if not remote_name:
-                    remote_name = remote.get("name", "unknown")
-            except Exception:
-                pass  # Unreachable — save with no device_id, will be learned on first contact
+    remote_device_id = None
+    remote_name = body.name.strip()
+    # reachable=True  → we can push files directly to them
+    # reachable=False → they must pull from us; we pull from them via Receive button
+    reachable = False
+
+    async with httpx.AsyncClient(timeout=5) as client:
+        try:
+            resp = await client.get(f"http://{body.ip}:{body.port}/api/peer/hello")
+            resp.raise_for_status()
+            remote = resp.json()
+            remote_device_id = remote.get("device_id")
+            if not remote_name:
+                remote_name = remote.get("name", "unknown")
+            reachable = True
+        except Exception:
+            pass  # Save anyway; reachable=False means pull-only for this partner
 
     if remote_device_id and state.get_partner_by_device_id(remote_device_id):
         raise HTTPException(409, "Partner already added (device already known)")
 
-    partner = state.add_partner(remote_name or "unknown", body.ip, body.port, remote_device_id)
+    partner = state.add_partner(remote_name or "unknown", body.ip, body.port, remote_device_id, reachable)
     await state.broadcast("partners_update", state.partners)
     return partner
 
@@ -172,7 +176,7 @@ async def upload_files(files: list[UploadFile] = File(...)):
     return results
 
 
-# ── outbox ────────────────────────────────────────────────────────────────────
+# ── outbox (for pull-side: partner queues here, we pull on Receive) ───────────
 
 
 @app.get("/api/outbox")
@@ -180,46 +184,62 @@ async def list_outbox():
     return state.outbox
 
 
-class QueueRequest(BaseModel):
-    partner_id: str
-    files: list[dict]  # [{file_id, name, path, size}]
-
-
-@app.post("/api/queue")
-async def queue_for_send(body: QueueRequest, background_tasks: BackgroundTasks):
-    partner = state.get_partner(body.partner_id)
-    if not partner:
-        raise HTTPException(404, "Partner not found")
-
-    file_list = [{"path": f["path"], "name": f["name"], "size": f["size"]} for f in body.files]
-    transfer = state.add_transfer(body.partner_id, file_list)
-    await state.broadcast("outbox_update", state.outbox)
-    background_tasks.add_task(notify_partner, partner, transfer["transfer_id"], len(file_list))
-    return transfer
-
-
 @app.delete("/api/outbox/{transfer_id}")
-async def cancel_transfer(transfer_id: str):
+async def cancel_outbox_entry(transfer_id: str):
     state.remove_transfer(transfer_id)
     await state.broadcast("outbox_update", state.outbox)
     return {"ok": True}
 
 
-# ── manual trigger ────────────────────────────────────────────────────────────
+# ── send (push directly to partner) ──────────────────────────────────────────
 
 
-@app.post("/api/trigger/{partner_id}")
-async def manual_trigger(partner_id: str, background_tasks: BackgroundTasks):
-    partner = state.get_partner(partner_id)
+class SendRequest(BaseModel):
+    partner_id: str
+    files: list[dict]  # [{file_id, name, path, size}]
+
+
+@app.post("/api/send")
+async def send_to_partner(body: SendRequest):
+    partner = state.get_partner(body.partner_id)
     if not partner:
         raise HTTPException(404, "Partner not found")
 
-    pending = [t for t in state.outbox if t["partner_id"] == partner_id]
-    for t in pending:
-        background_tasks.add_task(notify_partner, partner, t["transfer_id"], len(t["files"]))
+    transfer_id = str(uuid.uuid4())
+    file_list = [{"path": f["path"], "name": f["name"], "size": f["size"]} for f in body.files]
 
-    background_tasks.add_task(receive_from_partner, partner)
-    return {"ok": True, "pending_sends": len(pending)}
+    await state.broadcast("send_start", {
+        "transfer_id": transfer_id,
+        "partner_name": partner["name"],
+        "files": [{"name": f["name"], "size": f["size"]} for f in file_list],
+    })
+
+    task = asyncio.create_task(push_files_to_partner(partner, file_list, transfer_id))
+    state.active_tasks[transfer_id] = task
+    return {"transfer_id": transfer_id, "ok": True}
+
+
+# ── receive (pull from partner) ───────────────────────────────────────────────
+
+
+@app.post("/api/receive/{partner_id}")
+async def receive_from_partner_endpoint(partner_id: str):
+    partner = state.get_partner(partner_id)
+    if not partner:
+        raise HTTPException(404, "Partner not found")
+    asyncio.create_task(receive_from_partner(partner))
+    return {"ok": True}
+
+
+# ── abort ─────────────────────────────────────────────────────────────────────
+
+
+@app.post("/api/abort/{transfer_id}")
+async def abort_transfer(transfer_id: str):
+    task = state.active_tasks.get(transfer_id)
+    if task and not task.done():
+        task.cancel()
+    return {"ok": True}
 
 
 # ── log ───────────────────────────────────────────────────────────────────────
@@ -261,11 +281,64 @@ async def peer_hello():
     return {"device_id": state.device_id, "name": state.config["device_name"]}
 
 
-@app.post("/api/peer/notify")
-async def peer_notify(request: Request, background_tasks: BackgroundTasks):
+@app.post("/api/peer/push/{filename:path}")
+async def peer_receive_push(filename: str, request: Request):
+    """Sender streams a file directly to us."""
     partner = _require_partner(request)
-    background_tasks.add_task(receive_from_partner, partner)
-    return {"ok": True}
+    transfer_id = request.headers.get("X-Transfer-ID", str(uuid.uuid4()))
+    total = int(request.headers.get("Content-Length", 0))
+
+    receive_dir = Path(state.config["receive_dir"])
+    receive_dir.mkdir(parents=True, exist_ok=True)
+
+    dest = receive_dir / filename
+    if dest.exists():
+        stem, suffix = dest.stem, dest.suffix
+        for i in range(1, 10000):
+            dest = receive_dir / f"{stem}_{i}{suffix}"
+            if not dest.exists():
+                break
+
+    await state.broadcast("receive_start", {
+        "transfer_id": transfer_id,
+        "partner_name": partner["name"],
+        "files": [{"name": filename, "size": total}],
+    })
+
+    received = 0
+    last_pct = -1
+    try:
+        async with aiofiles.open(dest, "wb") as f:
+            async for chunk in request.stream():
+                await f.write(chunk)
+                received += len(chunk)
+                if total > 0:
+                    pct = int(received * 100 / total)
+                    if pct != last_pct:
+                        last_pct = pct
+                        await state.broadcast("receive_progress", {
+                            "transfer_id": transfer_id,
+                            "filename": filename,
+                            "partner_name": partner["name"],
+                            "percent": pct,
+                        })
+    except Exception as e:
+        if dest.exists() and dest.stat().st_size == 0:
+            dest.unlink(missing_ok=True)
+        await state.broadcast("receive_error", {
+            "transfer_id": transfer_id, "filename": filename, "error": str(e)
+        })
+        raise HTTPException(500, str(e))
+
+    entry = state.add_log("received", partner["name"], filename, "ok", received)
+    await state.broadcast("log_entry", entry)
+    await state.broadcast("receive_complete", {
+        "transfer_id": transfer_id,
+        "filename": filename,
+        "saved_as": dest.name,
+        "partner_name": partner["name"],
+    })
+    return {"ok": True, "saved_as": dest.name}
 
 
 @app.get("/api/peer/check")
@@ -360,17 +433,87 @@ async def peer_ack_file(transfer_id: str, filename: str, request: Request):
 # ── background helpers ────────────────────────────────────────────────────────
 
 
-async def notify_partner(partner: dict, transfer_id: str, file_count: int):
-    url = f"http://{partner['ip']}:{partner['port']}/api/peer/notify"
-    async with httpx.AsyncClient(timeout=3) as client:
-        try:
-            await client.post(
-                url,
-                json={"transfer_id": transfer_id, "file_count": file_count},
-                headers={"X-Device-ID": state.device_id},
-            )
-        except Exception:
-            pass  # poll fallback will catch it
+async def push_files_to_partner(partner: dict, files: list[dict], transfer_id: str):
+    """Push each file directly to partner. Falls back to outbox if unreachable."""
+    try:
+        base_url = f"http://{partner['ip']}:{partner['port']}"
+        timeout = httpx.Timeout(connect=3.0, read=None, write=None, pool=5.0)
+
+        for file_info in files:
+            file_path = Path(file_info["path"])
+            filename = file_info["name"]
+
+            if not file_path.exists():
+                await state.broadcast("send_error", {
+                    "transfer_id": transfer_id, "filename": filename, "error": "File not found",
+                })
+                continue
+
+            file_size = file_path.stat().st_size
+            url = f"{base_url}/api/peer/push/{urllib.parse.quote(filename)}"
+            sent_ref = [0]
+            pct_ref = [-1]
+
+            async def streamer(fp=file_path, fs=file_size, sr=sent_ref, pr=pct_ref):
+                async with aiofiles.open(fp, "rb") as f:
+                    while chunk := await f.read(65536):
+                        yield chunk
+                        sr[0] += len(chunk)
+                        if fs > 0:
+                            pct = int(sr[0] * 100 / fs)
+                            if pct != pr[0]:
+                                pr[0] = pct
+                                await state.broadcast("send_progress", {
+                                    "transfer_id": transfer_id,
+                                    "filename": filename,
+                                    "partner_name": partner["name"],
+                                    "percent": pct,
+                                })
+
+            try:
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    resp = await client.post(
+                        url,
+                        content=streamer(),
+                        headers={
+                            "X-Device-ID": state.device_id,
+                            "Content-Length": str(file_size),
+                            "X-Transfer-ID": transfer_id,
+                        },
+                    )
+                    resp.raise_for_status()
+
+                entry = state.add_log("sent", partner["name"], filename, "ok", file_size)
+                await state.broadcast("log_entry", entry)
+                await state.broadcast("send_complete", {
+                    "transfer_id": transfer_id, "filename": filename,
+                })
+
+            except asyncio.CancelledError:
+                await state.broadcast("send_cancelled", {
+                    "transfer_id": transfer_id, "filename": filename,
+                })
+                raise
+
+            except (httpx.ConnectError, httpx.ConnectTimeout):
+                # Partner unreachable — queue file for them to pull when ready
+                t = state.add_transfer(partner["id"], [file_info])
+                await state.broadcast("send_queued", {
+                    "transfer_id": transfer_id,
+                    "filename": filename,
+                    "partner_name": partner["name"],
+                    "outbox_id": t["transfer_id"],
+                })
+
+            except Exception as e:
+                await state.broadcast("send_error", {
+                    "transfer_id": transfer_id, "filename": filename, "error": str(e),
+                })
+
+    except asyncio.CancelledError:
+        pass
+    finally:
+        state.active_tasks.pop(transfer_id, None)
 
 
 async def receive_from_partner(partner: dict):

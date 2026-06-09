@@ -105,7 +105,9 @@
   .pb-send { background: var(--send-color); }
   .pb-recv { background: var(--recv-color); }
   .pb-error { background: var(--error); }
-  .transfer-pct { font-size: 12px; color: var(--muted); margin-top: 5px; text-align: right; }
+  .transfer-pct { font-size: 12px; color: var(--muted); margin-top: 5px; display:flex; justify-content:space-between; align-items:center; }
+  .btn-abort { background:none; border:none; color:var(--muted); cursor:pointer; font-size:13px; padding:0 2px; }
+  .btn-abort:hover { color:var(--error); }
 
   /* ── log ── */
   #log-list { display: flex; flex-direction: column; gap: 5px; max-height: 320px; overflow-y: auto; }
@@ -179,9 +181,8 @@
         </div>
         <input type="file" id="file-input" multiple onchange="handleFileInput(this)">
         <div id="staged-list"></div>
-        <div class="send-controls" id="send-controls" style="display:none">
-          <select id="partner-select"><option value="">Select partner…</option></select>
-          <button class="btn btn-primary" onclick="queueSend()">&#8594; Send</button>
+        <div id="send-hint" style="display:none;margin-top:10px;font-size:13px;color:var(--muted);">
+          Click <strong>Send</strong> on a partner to transfer these files.
         </div>
       </div>
     </div>
@@ -216,13 +217,6 @@
 <div class="modal-backdrop" id="add-partner-modal">
   <div class="modal">
     <h3>Add Partner</h3>
-    <div id="ap-myid-box" style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:14px;font-size:12px;">
-      <div style="color:var(--muted);margin-bottom:4px;">Your Device ID — share this with the other machine:</div>
-      <div style="display:flex;align-items:center;gap:8px;">
-        <code id="ap-myid" style="flex:1;font-size:12px;color:var(--accent);word-break:break-all;"></code>
-        <button class="btn btn-sm btn-outline" onclick="copyMyId()">Copy</button>
-      </div>
-    </div>
     <div class="form-row">
       <label>Display Name</label>
       <input id="ap-name" placeholder="e.g. MacBook" />
@@ -235,11 +229,8 @@
       <label>Port</label>
       <input id="ap-port" placeholder="8765" value="8765" />
     </div>
-    <div class="form-row">
-      <label>Their Device ID <span style="color:var(--muted);font-weight:400">(optional — leave blank to auto-detect)</span></label>
-      <input id="ap-device-id" placeholder="paste their device ID here if unreachable" />
-    </div>
-    <div id="ap-error" style="color:var(--error);font-size:12px;min-height:16px;margin-top:4px;"></div>
+    <div id="ap-status" style="font-size:12px;min-height:16px;margin-top:4px;color:var(--muted);"></div>
+    <div id="ap-error" style="color:var(--error);font-size:12px;min-height:16px;"></div>
     <div class="modal-footer">
       <button class="btn btn-outline" onclick="closeModal('add-partner-modal')">Cancel</button>
       <button class="btn btn-primary" id="ap-btn" onclick="submitAddPartner()">Save Partner</button>
