@@ -14,7 +14,13 @@ async function api(method, path, body) {
   }
   const r = await fetch(path, opts);
   if (!r.ok) {
-    const msg = await r.text().catch(() => r.statusText);
+    let msg = r.statusText;
+    try {
+      const data = await r.json();
+      msg = data.detail || JSON.stringify(data);
+    } catch {
+      msg = await r.text().catch(() => r.statusText);
+    }
     throw new Error(msg);
   }
   return r.json();

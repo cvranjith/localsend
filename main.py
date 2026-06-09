@@ -111,7 +111,8 @@ async def add_partner(body: AddPartner):
             resp.raise_for_status()
             remote = resp.json()
         except Exception as e:
-            raise HTTPException(400, f"Could not reach {body.ip}:{body.port} — {e}")
+            reason = str(e) or type(e).__name__
+            raise HTTPException(400, f"Could not reach {body.ip}:{body.port} — {reason}")
 
     remote_device_id = remote.get("device_id")
     if not remote_device_id:
