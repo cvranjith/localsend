@@ -159,9 +159,12 @@
   }
   .toast-preview-actions { display: flex; gap: 6px; }
 
-  /* ── log open buttons ── */
+  /* ── log action buttons ── */
   .log-open-btn { background: none; border: 1px solid var(--border); color: var(--muted); border-radius: 4px; padding: 1px 6px; font-size: 11px; cursor: pointer; flex-shrink: 0; }
   .log-open-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .log-del-btn { background: none; border: none; color: transparent; padding: 1px 4px; font-size: 13px; cursor: pointer; flex-shrink: 0; transition: color .15s; }
+  .log-item:hover .log-del-btn { color: var(--muted); }
+  .log-del-btn:hover { color: var(--error) !important; }
 
   /* ── modal ── */
   .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none; align-items: center; justify-content: center; z-index: 100; }

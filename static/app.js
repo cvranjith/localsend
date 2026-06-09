@@ -592,22 +592,36 @@ function logItemHTML(e) {
   const arrow  = isErr ? "✗" : isSent ? "↑" : "↓";
   const verb   = isSent ? "to" : "from";
 
-  // Store path for open callbacks
   if (e.path) logPaths[e.id] = e.path;
 
   const openBtns = (!isSent && !isErr && e.path) ? `
-    <button class="log-open-btn" onclick="openLogFile('${e.id}')" title="Open file">&#128194;</button>
-    <button class="log-open-btn" onclick="openLogFolder('${e.id}')" title="Show in Finder">&#128193;</button>` : "";
+    <button class="log-open-btn" onclick="event.stopPropagation();openLogFile('${e.id}')" title="Open file">&#128194;</button>
+    <button class="log-open-btn" onclick="event.stopPropagation();openLogFolder('${e.id}')" title="Show in Finder">&#128193;</button>` : "";
 
   return `
-  <div class="log-item ${cls}">
+  <div class="log-item ${cls}" id="log-${e.id}">
     <span class="log-arrow">${arrow}</span>
     <span class="log-fname" title="${esc(e.filename)}">${esc(e.filename)}</span>
     <span class="log-partner">${esc(verb)} ${esc(e.partner_name)}</span>
     ${e.size ? `<span class="log-size">${fmtSize(e.size)}</span>` : ""}
     ${openBtns}
     <span class="log-time">${fmtTime(e.ts)}</span>
+    <button class="log-del-btn" onclick="event.stopPropagation();deleteLogEntry('${e.id}')" title="Remove from log">&#10005;</button>
   </div>`;
+}
+
+async function deleteLogEntry(id) {
+  try {
+    await DEL(`/api/log/${id}`);
+    const el = document.getElementById(`log-${id}`);
+    if (el) el.remove();
+    delete logPaths[id];
+    const cnt = document.getElementById("log-count");
+    const n = Math.max(0, (parseInt(cnt.textContent) || 0) - 1);
+    cnt.textContent = n ? n + " entries" : "";
+    const list = document.getElementById("log-list");
+    if (!list.children.length) list.innerHTML = '<div class="log-empty">No activity yet</div>';
+  } catch (e) { console.error("Delete log entry failed:", e); }
 }
 
 // ── modals ────────────────────────────────────────────────────────────────────

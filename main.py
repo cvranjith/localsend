@@ -193,6 +193,10 @@ async def list_outbox():
 
 @app.delete("/api/outbox/{transfer_id}")
 async def cancel_outbox_entry(transfer_id: str):
+    t = state.get_transfer(transfer_id)
+    if t:
+        for f in t.get("files", []):
+            Path(f["path"]).unlink(missing_ok=True)
     state.remove_transfer(transfer_id)
     await state.broadcast("outbox_update", state.outbox)
     return {"ok": True}
@@ -255,6 +259,13 @@ async def abort_transfer(transfer_id: str):
 @app.get("/api/log")
 async def get_log():
     return sorted(state.log, key=lambda e: e["ts"], reverse=True)
+
+
+@app.delete("/api/log/{entry_id}")
+async def delete_log_entry(entry_id: str):
+    if not state.remove_log_entry(entry_id):
+        raise HTTPException(404, "Log entry not found")
+    return {"ok": True}
 
 
 class OpenRequest(BaseModel):
@@ -450,6 +461,8 @@ async def peer_serve_file(transfer_id: str, filename: str, request: Request):
 async def peer_ack_file(transfer_id: str, filename: str, request: Request):
     partner = _require_partner(request)
     file_info = state.ack_file(transfer_id, filename)
+    if file_info and file_info.get("path"):
+        Path(file_info["path"]).unlink(missing_ok=True)  # staging copy no longer needed
     await state.broadcast("outbox_update", state.outbox)
     # Let the sender UI know the queued file was pulled successfully
     await state.broadcast("send_complete", {"transfer_id": transfer_id, "filename": filename})
@@ -531,6 +544,7 @@ async def push_files_to_partner(partner: dict, files: list[dict], transfer_id: s
                 await state.broadcast("send_complete", {
                     "transfer_id": transfer_id, "filename": filename,
                 })
+                file_path.unlink(missing_ok=True)  # staging copy no longer needed
 
             except asyncio.CancelledError:
                 await state.broadcast("send_cancelled", {

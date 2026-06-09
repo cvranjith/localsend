@@ -147,6 +147,14 @@ class AppState:
     def _save_log(self):
         LOG_FILE.write_text(json.dumps(self.log[-500:], indent=2))
 
+    def remove_log_entry(self, entry_id: str) -> bool:
+        before = len(self.log)
+        self.log = [e for e in self.log if e["id"] != entry_id]
+        if len(self.log) < before:
+            self._save_log()
+            return True
+        return False
+
     def add_log(
         self, direction: str, partner_name: str, filename: str, status: str, size: int = 0, path: str = None
     ) -> dict:
