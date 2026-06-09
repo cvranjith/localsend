@@ -148,7 +148,7 @@ class AppState:
         LOG_FILE.write_text(json.dumps(self.log[-500:], indent=2))
 
     def add_log(
-        self, direction: str, partner_name: str, filename: str, status: str, size: int = 0
+        self, direction: str, partner_name: str, filename: str, status: str, size: int = 0, path: str = None
     ) -> dict:
         entry = {
             "id": str(uuid.uuid4()),
@@ -158,6 +158,7 @@ class AppState:
             "filename": filename,
             "status": status,  # "ok" | "error"
             "size": size,
+            "path": path,
         }
         self.log.append(entry)
         self._save_log()

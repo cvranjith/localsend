@@ -1,12 +1,15 @@
 // ── state ─────────────────────────────────────────────────────────────────────
 let config = {};
 let partners = [];
-let stagedFiles = [];   // {file_id, name, path, size}
+let stagedFiles = [];     // {file_id, name, path, size}
 let activeTransfers = {}; // key: `${transfer_id}:${filename}` → DOM element
 let partnerStatus = {};   // partner_id → {online, last_seen_sec}
 let pollIntervalSec = 60;
 let pollTimer = null;
 let pollSecondsLeft = 0;
+let outboxBarMap = {};    // `${outbox_transfer_id}:${filename}` → original bar key
+let toastStore = {};      // toast_id → {saved_path, text_preview, ...}
+let logPaths = {};        // log_entry_id → saved_path
 
 // ── api helpers ───────────────────────────────────────────────────────────────
 async function api(method, path, body) {
@@ -102,8 +105,8 @@ function partnerHTML(p) {
   const dotCls = online ? "online" : recentlyActive ? "recent" : (online === false ? "offline" : "");
   const dotTip = online ? "online" : recentlyActive ? `active ${lastSeenSec}s ago` : "offline";
 
-  const modeLabel  = p.reachable ? "server" : "client";
-  const modeBadge  = p.reachable
+  const modeLabel = p.reachable ? "server" : "client";
+  const modeBadge = p.reachable
     ? `<span class="mode-badge mode-server">${modeLabel}</span>`
     : `<span class="mode-badge mode-client">${modeLabel}</span>`;
 
@@ -116,6 +119,13 @@ function partnerHTML(p) {
     </div>
     <button class="btn btn-sm btn-danger" onclick="event.stopPropagation();removePartner('${p.id}')" title="Remove partner">&#10005;</button>
   </div>`;
+}
+
+function setPartnerDot(partnerId, cls, tip) {
+  const dot = document.querySelector(`#partner-${partnerId} .status-dot`);
+  if (!dot) return;
+  dot.className = "status-dot " + cls;
+  dot.title = tip;
 }
 
 function openAddPartner() {
@@ -175,10 +185,11 @@ async function pingAll() {
       const online = status.online;
       const lastSeenSec = status.last_seen_sec;
       const recentlyActive = !online && lastSeenSec != null && lastSeenSec < 120;
-      const dot = document.querySelector(`#partner-${p.id} .status-dot`);
-      if (!dot) return;
-      dot.className = "status-dot " + (online ? "online" : recentlyActive ? "recent" : "offline");
-      dot.title = online ? "online" : recentlyActive ? `active ${lastSeenSec}s ago` : "offline";
+      setPartnerDot(
+        p.id,
+        online ? "online" : recentlyActive ? "recent" : "offline",
+        online ? "online" : recentlyActive ? `active ${lastSeenSec}s ago` : "offline"
+      );
     });
   } catch {}
 }
@@ -193,6 +204,14 @@ function connectSSE() {
 
     if      (type === "partners_update") { partners = data; renderPartners(); }
     else if (type === "config_update")   { config = data; renderConfig(); }
+
+    else if (type === "partner_active") {
+      // Partner just contacted us — show green immediately without waiting for next pingAll
+      if (!partnerStatus[data.id]) partnerStatus[data.id] = {};
+      partnerStatus[data.id].online = true;
+      partnerStatus[data.id].last_seen_sec = 0;
+      setPartnerDot(data.id, "online", "online");
+    }
 
     else if (type === "status") {
       const sb = document.getElementById("statusbar");
@@ -209,16 +228,23 @@ function connectSSE() {
       data.files.forEach(f => addTransferBar(`${data.transfer_id}:${f.name}`, "send", f.name, data.partner_name, 0, data.transfer_id));
     }
     else if (type === "send_progress") {
-      updateTransferBar(`${data.transfer_id}:${data.filename}`, data.percent);
+      const key = outboxBarMap[`${data.transfer_id}:${data.filename}`] || `${data.transfer_id}:${data.filename}`;
+      updateTransferBar(key, data.percent);
     }
     else if (type === "send_complete") {
-      const key = `${data.transfer_id}:${data.filename}`;
-      completeTransferBar(key, "sent ✓");
-      setTimeout(() => removeTransferBar(key), 3000);
+      const resolvedKey = outboxBarMap[`${data.transfer_id}:${data.filename}`] || `${data.transfer_id}:${data.filename}`;
+      completeTransferBar(resolvedKey, "sent ✓");
+      setTimeout(() => {
+        removeTransferBar(resolvedKey);
+        delete outboxBarMap[`${data.transfer_id}:${data.filename}`];
+      }, 3000);
     }
     else if (type === "send_queued") {
-      const key = `${data.transfer_id}:${data.filename}`;
-      updateTransferBarLabel(key, "queued — waiting for partner to pull");
+      const barKey = `${data.transfer_id}:${data.filename}`;
+      if (data.outbox_id) {
+        outboxBarMap[`${data.outbox_id}:${data.filename}`] = barKey;
+      }
+      updateTransferBarLabel(barKey, "queued — partner will pull");
     }
     else if (type === "send_error") {
       const key = `${data.transfer_id}:${data.filename}`;
@@ -353,25 +379,64 @@ async function openFolder(path) {
   catch (e) { alert("Open failed: " + e.message); }
 }
 
+// Log-entry open helpers (path stored in logPaths by entry id)
+function openLogFile(id)   { const p = logPaths[id]; if (p) openFile(p); }
+function openLogFolder(id) { const p = logPaths[id]; if (p) openFolder(p); }
+
+// Toast open helpers (path stored in toastStore by toast id)
+function openToastFile(id)   { const d = toastStore[id]; if (d?.saved_path) openFile(d.saved_path); }
+function openToastFolder(id) { const d = toastStore[id]; if (d?.saved_path) openFolder(d.saved_path); }
+
+// Toast clipboard copy / preview expand
+function copyToastText(id) {
+  const text = (toastStore[id] || {}).text_preview;
+  if (!text) return;
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = document.getElementById(`${id}-copybtn`);
+    if (btn) { const orig = btn.textContent; btn.textContent = "Copied!"; setTimeout(() => { btn.textContent = orig; }, 1500); }
+  });
+}
+
+function expandToastPreview(id) {
+  const text = (toastStore[id] || {}).text_preview;
+  if (!text) return;
+  const el = document.getElementById(`${id}-preview`);
+  if (el) el.textContent = text;
+  const btn = document.getElementById(`${id}-expandbtn`);
+  if (btn) btn.remove();
+}
+
 // ── toasts ────────────────────────────────────────────────────────────────────
 function showToast(data) {
   const container = document.getElementById("toast-container");
   const id = `toast-${Date.now()}`;
+  toastStore[id] = data;
+
   const div = document.createElement("div");
   div.className = "toast";
   div.id = id;
   let countdown = 30;
 
-  const openBtns = data.saved_path ? `
-    <button class="btn btn-sm btn-outline" onclick="openFile(${JSON.stringify(data.saved_path)})">Open</button>
-    <button class="btn btn-sm btn-outline" onclick="openFolder(${JSON.stringify(data.saved_path)})">Show in Folder</button>` : "";
+  const preview = data.text_preview;
+  const previewShort = preview ? preview.slice(0, 200) : null;
+  const needsExpand  = preview && preview.length > 200;
 
   div.innerHTML = `
     <div class="toast-title">&#8595; File received</div>
     <div class="toast-filename" title="${esc(data.saved_as || data.filename)}">${esc(data.saved_as || data.filename)}</div>
     <div class="toast-from">from ${esc(data.partner_name)}</div>
-    <div class="toast-actions">
-      ${openBtns}
+    ${preview ? `
+    <div class="toast-preview">
+      <div class="toast-preview-text" id="${id}-preview">${esc(previewShort)}${needsExpand ? "…" : ""}</div>
+      <div class="toast-preview-actions">
+        ${needsExpand ? `<button class="btn btn-sm btn-outline" id="${id}-expandbtn" onclick="expandToastPreview('${id}')">Show all</button>` : ""}
+        <button class="btn btn-sm btn-outline" id="${id}-copybtn" onclick="copyToastText('${id}')">Copy text</button>
+      </div>
+    </div>` : ""}
+    <div class="toast-actions" style="margin-top:8px">
+      ${data.saved_path ? `
+      <button class="btn btn-sm btn-outline" id="${id}-openbtn" onclick="openToastFile('${id}')">Open</button>
+      <button class="btn btn-sm btn-outline" onclick="openToastFolder('${id}')">Show in Folder</button>` : ""}
       <span class="toast-timer" id="${id}-timer">${countdown}s</span>
       <button class="btn btn-sm btn-danger" onclick="dismissToast('${id}')">&#10005;</button>
     </div>`;
@@ -390,6 +455,7 @@ function showToast(data) {
 function dismissToast(id) {
   const el = document.getElementById(id);
   if (el) { clearInterval(el._timer); el.remove(); }
+  delete toastStore[id];
 }
 
 // ── auto-poll ─────────────────────────────────────────────────────────────────
@@ -525,12 +591,21 @@ function logItemHTML(e) {
   const cls    = isErr ? "log-error" : isSent ? "log-sent" : "log-received";
   const arrow  = isErr ? "✗" : isSent ? "↑" : "↓";
   const verb   = isSent ? "to" : "from";
+
+  // Store path for open callbacks
+  if (e.path) logPaths[e.id] = e.path;
+
+  const openBtns = (!isSent && !isErr && e.path) ? `
+    <button class="log-open-btn" onclick="openLogFile('${e.id}')" title="Open file">&#128194;</button>
+    <button class="log-open-btn" onclick="openLogFolder('${e.id}')" title="Show in Finder">&#128193;</button>` : "";
+
   return `
   <div class="log-item ${cls}">
     <span class="log-arrow">${arrow}</span>
     <span class="log-fname" title="${esc(e.filename)}">${esc(e.filename)}</span>
     <span class="log-partner">${esc(verb)} ${esc(e.partner_name)}</span>
     ${e.size ? `<span class="log-size">${fmtSize(e.size)}</span>` : ""}
+    ${openBtns}
     <span class="log-time">${fmtTime(e.ts)}</span>
   </div>`;
 }

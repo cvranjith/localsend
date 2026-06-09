@@ -280,25 +280,26 @@ async def open_path(body: OpenRequest):
 def _require_partner(request: Request) -> dict:
     device_id = request.headers.get("X-Device-ID")
 
-    # Try device_id match first
+    partner = None
     if device_id:
         partner = state.get_partner_by_device_id(device_id)
-        if partner:
-            state.partner_last_seen[partner["id"]] = time.time()
-            return partner
 
-    # Fallback: match by client IP for manually-paired partners with no device_id yet
-    client_ip = request.client.host if request.client else None
-    if client_ip:
-        partner = state.get_partner_by_ip(client_ip)
-        if partner and not partner.get("device_id"):
-            if device_id:
-                partner["device_id"] = device_id
-                state._save_partners()
-            state.partner_last_seen[partner["id"]] = time.time()
-            return partner
+    if not partner:
+        client_ip = request.client.host if request.client else None
+        if client_ip:
+            candidate = state.get_partner_by_ip(client_ip)
+            if candidate and not candidate.get("device_id"):
+                if device_id:
+                    candidate["device_id"] = device_id
+                    state._save_partners()
+                partner = candidate
 
-    raise HTTPException(403, "Unknown device — add this device as a partner first")
+    if not partner:
+        raise HTTPException(403, "Unknown device — add this device as a partner first")
+
+    state.partner_last_seen[partner["id"]] = time.time()
+    asyncio.create_task(state.broadcast("partner_active", {"id": partner["id"]}))
+    return partner
 
 
 @app.get("/api/peer/hello")
@@ -355,7 +356,7 @@ async def peer_receive_push(filename: str, request: Request):
         })
         raise HTTPException(500, str(e))
 
-    entry = state.add_log("received", partner["name"], filename, "ok", received)
+    entry = state.add_log("received", partner["name"], filename, "ok", received, path=str(dest))
     await state.broadcast("log_entry", entry)
     await state.broadcast("receive_complete", {
         "transfer_id": transfer_id,
@@ -363,6 +364,7 @@ async def peer_receive_push(filename: str, request: Request):
         "saved_as": dest.name,
         "saved_path": str(dest),
         "partner_name": partner["name"],
+        "text_preview": _text_preview(dest),
     })
     return {"ok": True, "saved_as": dest.name}
 
@@ -449,11 +451,26 @@ async def peer_ack_file(transfer_id: str, filename: str, request: Request):
     partner = _require_partner(request)
     file_info = state.ack_file(transfer_id, filename)
     await state.broadcast("outbox_update", state.outbox)
+    # Let the sender UI know the queued file was pulled successfully
+    await state.broadcast("send_complete", {"transfer_id": transfer_id, "filename": filename})
 
     size = file_info.get("size", 0) if file_info else 0
     entry = state.add_log("sent", partner["name"], filename, "ok", size)
     await state.broadcast("log_entry", entry)
     return {"ok": True}
+
+
+def _text_preview(dest: Path, max_bytes: int = 4096) -> Optional[str]:
+    """Return file contents as string if it looks like small text, else None."""
+    try:
+        if dest.stat().st_size > max_bytes:
+            return None
+        raw = dest.read_bytes()
+        if b"\x00" in raw:
+            return None
+        return raw.decode("utf-8")
+    except Exception:
+        return None
 
 
 # ── background helpers ────────────────────────────────────────────────────────
@@ -647,7 +664,7 @@ async def _download_file(
                     headers={"X-Device-ID": state.device_id},
                 )
 
-            entry = state.add_log("received", partner["name"], filename, "ok", total)
+            entry = state.add_log("received", partner["name"], filename, "ok", total, path=str(dest))
             await state.broadcast("log_entry", entry)
             await state.broadcast(
                 "receive_complete",
@@ -657,6 +674,7 @@ async def _download_file(
                     "saved_as": dest.name,
                     "saved_path": str(dest),
                     "partner_name": partner["name"],
+                    "text_preview": _text_preview(dest),
                 },
             )
 

@@ -149,6 +149,20 @@
   .toast-timer { font-size: 11px; color: var(--muted); margin-left: auto; }
   @keyframes toast-in { from { transform: translateX(120%); opacity: 0; } to { transform: none; opacity: 1; } }
 
+  /* ── toast preview ── */
+  .toast-preview { margin-top: 8px; }
+  .toast-preview-text {
+    background: var(--card); border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px 10px; font-size: 12px; font-family: monospace; color: var(--text);
+    max-height: 120px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;
+    margin-bottom: 6px;
+  }
+  .toast-preview-actions { display: flex; gap: 6px; }
+
+  /* ── log open buttons ── */
+  .log-open-btn { background: none; border: 1px solid var(--border); color: var(--muted); border-radius: 4px; padding: 1px 6px; font-size: 11px; cursor: pointer; flex-shrink: 0; }
+  .log-open-btn:hover { border-color: var(--accent); color: var(--accent); }
+
   /* ── modal ── */
   .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none; align-items: center; justify-content: center; z-index: 100; }
   .modal-backdrop.show { display: flex; }
