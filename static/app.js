@@ -4,6 +4,9 @@ let partners = [];
 let stagedFiles = [];   // {file_id, name, path, size}
 let activeTransfers = {}; // key: `${transfer_id}:${filename}` → DOM element
 let partnerStatus = {};   // partner_id → true/false
+let pollIntervalSec = 60;
+let pollTimer = null;
+let pollSecondsLeft = 0;
 
 // ── api helpers ───────────────────────────────────────────────────────────────
 async function api(method, path, body) {
@@ -38,6 +41,7 @@ async function init() {
     pingAll();
     setupDropzone();
     setInterval(pingAll, 30000);
+    startPollTimer();
   } catch (e) {
     console.error("Init failed", e);
   }
@@ -62,6 +66,7 @@ function renderConfig() {
 function openSettings() {
   document.getElementById("cfg-name").value = config.device_name || "";
   document.getElementById("cfg-dir").value  = config.receive_dir || "";
+  document.getElementById("cfg-poll").value = pollIntervalSec;
   openModal("settings-modal");
 }
 
@@ -71,6 +76,8 @@ async function saveSettings() {
       device_name: document.getElementById("cfg-name").value.trim(),
       receive_dir:  document.getElementById("cfg-dir").value.trim(),
     });
+    const newInterval = parseInt(document.getElementById("cfg-poll").value) || 60;
+    setPollInterval(Math.max(10, newInterval));
     renderConfig();
     closeModal("settings-modal");
   } catch (e) { alert("Save failed: " + e.message); }
@@ -307,6 +314,39 @@ async function receiveFromPartner(partnerId) {
 
 async function abortTransfer(transferId) {
   try { await POST(`/api/abort/${transferId}`); } catch {}
+}
+
+// ── auto-poll ─────────────────────────────────────────────────────────────────
+function startPollTimer() {
+  if (pollTimer) clearInterval(pollTimer);
+  pollSecondsLeft = pollIntervalSec;
+  updatePollBadge();
+  // Countdown tick every second
+  pollTimer = setInterval(async () => {
+    pollSecondsLeft--;
+    updatePollBadge();
+    if (pollSecondsLeft <= 0) {
+      pollSecondsLeft = pollIntervalSec;
+      await pollAllPartners();
+    }
+  }, 1000);
+}
+
+async function pollAllPartners() {
+  for (const partner of partners) {
+    try { await POST(`/api/receive/${partner.id}`); } catch {}
+  }
+}
+
+function updatePollBadge() {
+  const el = document.getElementById("poll-badge");
+  if (!el) return;
+  el.textContent = `poll in ${pollSecondsLeft}s`;
+}
+
+function setPollInterval(sec) {
+  pollIntervalSec = sec;
+  startPollTimer();
 }
 
 // ── transfer bars ─────────────────────────────────────────────────────────────

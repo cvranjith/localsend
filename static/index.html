@@ -149,6 +149,7 @@
   <span class="badge" id="device-badge">loading...</span>
   <span class="badge" id="addr-badge">&#8212;</span>
   <div class="header-spacer"></div>
+  <span class="badge" id="poll-badge" style="cursor:pointer;font-size:12px;" onclick="pollAllPartners()" title="Click to poll now">poll in …</span>
   <button class="btn-icon" onclick="openSettings()">&#9881; Settings</button>
 </header>
 
@@ -249,6 +250,10 @@
     <div class="form-row">
       <label>Receive Directory</label>
       <input id="cfg-dir" />
+    </div>
+    <div class="form-row">
+      <label>Auto-poll interval (seconds)</label>
+      <input id="cfg-poll" type="number" min="10" max="3600" />
     </div>
     <div class="modal-footer">
       <button class="btn btn-outline" onclick="closeModal('settings-modal')">Cancel</button>
