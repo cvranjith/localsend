@@ -80,6 +80,9 @@ class AppState:
     def get_partner_by_device_id(self, device_id: str) -> dict | None:
         return next((p for p in self.partners if p.get("device_id") == device_id), None)
 
+    def get_partner_by_ip(self, ip: str) -> dict | None:
+        return next((p for p in self.partners if p.get("ip") == ip), None)
+
     # ── outbox ────────────────────────────────────────────────────────────────
 
     def _load_outbox(self):

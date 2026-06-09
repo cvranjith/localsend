@@ -16,7 +16,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from state import AppState, STAGING_DIR
 
-POLL_INTERVAL = 30  # seconds
+POLL_INTERVAL = 60  # seconds
 
 
 def get_local_ip() -> str:
@@ -101,27 +101,31 @@ class AddPartner(BaseModel):
     name: str
     ip: str
     port: int
+    device_id: Optional[str] = None  # can be provided manually if auto-discovery fails
 
 
 @app.post("/api/partners")
 async def add_partner(body: AddPartner):
-    async with httpx.AsyncClient(timeout=5) as client:
-        try:
-            resp = await client.get(f"http://{body.ip}:{body.port}/api/peer/hello")
-            resp.raise_for_status()
-            remote = resp.json()
-        except Exception as e:
-            reason = str(e) or type(e).__name__
-            raise HTTPException(400, f"Could not reach {body.ip}:{body.port} — {reason}")
+    remote_device_id = body.device_id.strip() if body.device_id else None
+    remote_name = body.name.strip()
 
-    remote_device_id = remote.get("device_id")
     if not remote_device_id:
-        raise HTTPException(400, "Remote did not return a device_id")
-    if state.get_partner_by_device_id(remote_device_id):
+        # Try auto-discovery; if unreachable, save anyway (manual pairing)
+        async with httpx.AsyncClient(timeout=5) as client:
+            try:
+                resp = await client.get(f"http://{body.ip}:{body.port}/api/peer/hello")
+                resp.raise_for_status()
+                remote = resp.json()
+                remote_device_id = remote.get("device_id")
+                if not remote_name:
+                    remote_name = remote.get("name", "unknown")
+            except Exception:
+                pass  # Unreachable — save with no device_id, will be learned on first contact
+
+    if remote_device_id and state.get_partner_by_device_id(remote_device_id):
         raise HTTPException(409, "Partner already added (device already known)")
 
-    name = body.name.strip() or remote.get("name", "unknown")
-    partner = state.add_partner(name, body.ip, body.port, remote_device_id)
+    partner = state.add_partner(remote_name or "unknown", body.ip, body.port, remote_device_id)
     await state.broadcast("partners_update", state.partners)
     return partner
 
@@ -233,12 +237,25 @@ async def get_log():
 
 def _require_partner(request: Request) -> dict:
     device_id = request.headers.get("X-Device-ID")
-    if not device_id:
-        raise HTTPException(403, "Missing X-Device-ID header")
-    partner = state.get_partner_by_device_id(device_id)
-    if not partner:
-        raise HTTPException(403, "Unknown device — add this device as a partner first")
-    return partner
+
+    # Try device_id match first
+    if device_id:
+        partner = state.get_partner_by_device_id(device_id)
+        if partner:
+            return partner
+
+    # Fallback: match by client IP for manually-paired partners with no device_id yet
+    client_ip = request.client.host if request.client else None
+    if client_ip:
+        partner = state.get_partner_by_ip(client_ip)
+        if partner and not partner.get("device_id"):
+            if device_id:
+                # Auto-learn their device_id on first contact
+                partner["device_id"] = device_id
+                state._save_partners()
+            return partner
+
+    raise HTTPException(403, "Unknown device — add this device as a partner first")
 
 
 @app.get("/api/peer/hello")

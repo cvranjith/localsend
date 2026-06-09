@@ -134,27 +134,39 @@ function renderPartnerSelect() {
 function openAddPartner() {
   document.getElementById("ap-name").value = "";
   document.getElementById("ap-ip").value = "";
-  document.getElementById("ap-port").value = "8765";
+  document.getElementById("ap-port").value = config.port || "8765";
+  document.getElementById("ap-device-id").value = "";
   document.getElementById("ap-error").textContent = "";
+  document.getElementById("ap-myid").textContent = config.device_id || "";
   openModal("add-partner-modal");
   setTimeout(() => document.getElementById("ap-ip").focus(), 50);
+}
+
+function copyMyId() {
+  const id = config.device_id || "";
+  navigator.clipboard.writeText(id).then(() => {
+    const btn = event.target;
+    btn.textContent = "✓ Copied";
+    setTimeout(() => { btn.textContent = "Copy"; }, 1500);
+  });
 }
 
 async function submitAddPartner() {
   const name = document.getElementById("ap-name").value.trim();
   const ip = document.getElementById("ap-ip").value.trim();
   const port = parseInt(document.getElementById("ap-port").value) || 8765;
+  const device_id = document.getElementById("ap-device-id").value.trim() || null;
   const errEl = document.getElementById("ap-error");
   const btn = document.getElementById("ap-btn");
 
   if (!ip) { errEl.textContent = "IP address is required"; return; }
 
   btn.disabled = true;
-  btn.textContent = "Connecting…";
+  btn.textContent = "Saving…";
   errEl.textContent = "";
 
   try {
-    const p = await POST("/api/partners", { name, ip, port });
+    const p = await POST("/api/partners", { name, ip, port, device_id });
     partners.push(p);
     renderPartners();
     renderPartnerSelect();
@@ -164,7 +176,7 @@ async function submitAddPartner() {
     errEl.textContent = e.message;
   } finally {
     btn.disabled = false;
-    btn.textContent = "Connect";
+    btn.textContent = "Save Partner";
   }
 }
 
@@ -470,7 +482,7 @@ document.querySelectorAll(".modal-backdrop").forEach((el) => {
 });
 
 // Enter key in add partner form
-["ap-name", "ap-ip", "ap-port"].forEach((id) => {
+["ap-name", "ap-ip", "ap-port", "ap-device-id"].forEach((id) => {
   document.getElementById(id).addEventListener("keydown", (e) => {
     if (e.key === "Enter") submitAddPartner();
   });
