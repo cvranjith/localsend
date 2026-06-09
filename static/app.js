@@ -53,7 +53,17 @@ async function init() {
 // ── config / header ───────────────────────────────────────────────────────────
 function renderConfig() {
   document.getElementById("device-badge").textContent = config.device_name || "unknown";
-  document.getElementById("addr-badge").textContent = `port ${config.port}`;
+  const addr = config.local_ip ? `${config.local_ip}:${config.port}` : `port ${config.port}`;
+  const el = document.getElementById("addr-badge");
+  el.textContent = addr;
+  el.title = "Click to copy";
+  el.style.cursor = "pointer";
+  el.onclick = () => {
+    navigator.clipboard.writeText(addr).then(() => {
+      el.textContent = "✓ copied!";
+      setTimeout(() => { el.textContent = addr; }, 1500);
+    });
+  };
 }
 
 function openSettings() {

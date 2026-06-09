@@ -1,5 +1,6 @@
 import asyncio
 import json
+import socket
 import urllib.parse
 import uuid
 from pathlib import Path
@@ -16,6 +17,18 @@ from sse_starlette.sse import EventSourceResponse
 from state import AppState, STAGING_DIR
 
 POLL_INTERVAL = 30  # seconds
+
+
+def get_local_ip() -> str:
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
 
 app = FastAPI(title="LocalSend")
 state = AppState()
@@ -59,7 +72,7 @@ async def sse_events(request: Request):
 
 @app.get("/api/config")
 async def get_config():
-    return state.config
+    return {**state.config, "local_ip": get_local_ip()}
 
 
 class ConfigUpdate(BaseModel):
