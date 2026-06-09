@@ -100,22 +100,7 @@ function partnerHTML(p) {
   const status      = partnerStatus[p.id] || {};
   const online      = status.online;
   const lastSeenSec = status.last_seen_sec;
-
-  let dotCls, dotTip;
-  if (p.reachable) {
-    // Server mode: ping result is meaningful
-    dotCls = online ? "online" : (online === false ? "offline" : "");
-    dotTip = online ? "online" : "offline";
-  } else {
-    // Client mode: ping always fails (expected) — use last_seen instead
-    if (lastSeenSec != null && lastSeenSec < 10) {
-      dotCls = "online";  dotTip = "active";
-    } else if (lastSeenSec != null && lastSeenSec < 120) {
-      dotCls = "recent";  dotTip = `active ${lastSeenSec}s ago`;
-    } else {
-      dotCls = "";  dotTip = lastSeenSec != null ? `last seen ${Math.round(lastSeenSec/60)}m ago` : "waiting for contact";
-    }
-  }
+  const [dotCls, dotTip] = resolveStatus(p, online, lastSeenSec);
 
   const modeLabel = p.reachable ? "server" : "client";
   const modeBadge = p.reachable
@@ -187,29 +172,31 @@ async function removePartner(id) {
   renderPartners();
 }
 
+// Shared status resolution used by both partnerHTML and pingAll
+function resolveStatus(p, online, lastSeenSec) {
+  if (online) {
+    return ["online", "online"];
+  }
+  if (!p.reachable) {
+    // Client mode: ping failure is expected — use last_seen as signal
+    if (lastSeenSec != null && lastSeenSec < 10)  return ["online", "active"];
+    if (lastSeenSec != null && lastSeenSec < 120)  return ["recent", `active ${lastSeenSec}s ago`];
+    const tip = lastSeenSec != null ? `last seen ${Math.round(lastSeenSec / 60)}m ago` : "waiting for contact";
+    return ["", tip];
+  }
+  // Server mode: ping failure is unexpected
+  if (online === false) return ["offline", "offline"];
+  return ["", "unknown"];  // not yet pinged
+}
+
 async function pingAll() {
   if (!partners.length) return;
   try {
     const res = await GET("/api/partners/ping");
     partnerStatus = res;
     partners.forEach(p => {
-      const status = res[p.id] || {};
-      const online = status.online;
-      const lastSeenSec = status.last_seen_sec;
-      let cls, tip;
-      if (p.reachable) {
-        cls = online ? "online" : "offline";
-        tip = online ? "online" : "offline";
-      } else {
-        // Client mode: never show red — ping failure is expected
-        if (lastSeenSec != null && lastSeenSec < 10) {
-          cls = "online";  tip = "active";
-        } else if (lastSeenSec != null && lastSeenSec < 120) {
-          cls = "recent";  tip = `active ${lastSeenSec}s ago`;
-        } else {
-          cls = "";  tip = lastSeenSec != null ? `last seen ${Math.round(lastSeenSec/60)}m ago` : "waiting for contact";
-        }
-      }
+      const { online, last_seen_sec } = res[p.id] || {};
+      const [cls, tip] = resolveStatus(p, online, last_seen_sec);
       setPartnerDot(p.id, cls, tip);
     });
   } catch {}
