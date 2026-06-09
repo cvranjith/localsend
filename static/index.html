@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LocalSend</title>
+<style>
+  :root {
+    --bg: #1e2130;
+    --surface: #272d3f;
+    --card: #30374d;
+    --border: #424d6b;
+    --text: #e8eef6;
+    --muted: #9aa5be;
+    --accent: #4d9bff;
+    --accent-hover: #70b3ff;
+    --success: #4ec961;
+    --error: #f86a62;
+    --warning: #e0a832;
+    --send-color: #70b3ff;
+    --recv-color: #4ec961;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 15px; min-height: 100vh; }
+
+  /* ── layout ── */
+  header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 14px 24px; display: flex; align-items: center; gap: 14px; }
+  header h1 { font-size: 20px; font-weight: 600; letter-spacing: 0.5px; }
+  .badge { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; font-size: 13px; color: var(--muted); }
+  .header-spacer { flex: 1; }
+  .btn-icon { background: none; border: 1px solid var(--border); color: var(--muted); border-radius: 6px; padding: 6px 11px; cursor: pointer; font-size: 14px; }
+  .btn-icon:hover { border-color: var(--accent); color: var(--accent); }
+
+  .container { max-width: 1100px; margin: 0 auto; padding: 20px; display: grid; gap: 16px; }
+  .top-grid { display: grid; grid-template-columns: 320px 1fr; gap: 16px; }
+
+  /* ── cards ── */
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .card-header { padding: 14px 18px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
+  .card-header h2 { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; color: var(--muted); flex: 1; }
+  .card-body { padding: 16px; }
+
+  /* ── buttons ── */
+  .btn { display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; border-radius: 6px; border: none; cursor: pointer; font-size: 14px; font-weight: 500; transition: opacity .15s; }
+  .btn:hover { opacity: .85; }
+  .btn:disabled { opacity: .4; cursor: not-allowed; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-sm { padding: 5px 10px; font-size: 13px; }
+  .btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text); }
+  .btn-outline:hover { border-color: var(--accent); color: var(--accent); }
+  .btn-danger { background: transparent; border: 1px solid var(--border); color: var(--error); }
+  .btn-danger:hover { border-color: var(--error); }
+
+  /* ── form ── */
+  .form-row { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+  .form-row label { font-size: 13px; color: var(--muted); }
+  .form-inline { display: flex; gap: 6px; }
+  .form-inline input { flex: 1; }
+  input, select { background: var(--card); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 8px 12px; font-size: 14px; width: 100%; }
+  input:focus, select:focus { outline: none; border-color: var(--accent); }
+  input::placeholder { color: var(--muted); }
+
+  /* ── partners ── */
+  .partner-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); margin-bottom: 8px; background: var(--card); }
+  .status-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
+  .status-dot.online { background: var(--success); box-shadow: 0 0 6px var(--success); }
+  .status-dot.offline { background: var(--error); }
+  .partner-info { flex: 1; min-width: 0; }
+  .partner-name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 15px; }
+  .partner-addr { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .partner-actions { display: flex; gap: 5px; }
+
+  /* ── drop zone ── */
+  #dropzone {
+    border: 2px dashed var(--border); border-radius: 10px; padding: 36px 24px;
+    text-align: center; cursor: pointer; transition: all .2s; color: var(--muted);
+  }
+  #dropzone.hover { border-color: var(--accent); background: rgba(77,155,255,.08); color: var(--accent); }
+  #dropzone .dz-icon { font-size: 42px; margin-bottom: 10px; }
+  #dropzone p { font-size: 15px; }
+  #dropzone small { font-size: 12px; color: var(--muted); }
+  #file-input { display: none; }
+
+  /* ── staged files ── */
+  #staged-list { margin-top: 12px; display: flex; flex-direction: column; gap: 5px; }
+  .staged-file { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 6px; background: var(--card); border: 1px solid var(--border); }
+  .staged-file .fname { flex: 1; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .staged-file .fsize { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .staged-remove { background: none; border: none; color: var(--muted); cursor: pointer; padding: 2px 5px; font-size: 16px; }
+  .staged-remove:hover { color: var(--error); }
+
+  .send-controls { margin-top: 12px; display: flex; gap: 8px; align-items: center; }
+  .send-controls select { flex: 1; }
+
+  /* ── transfers ── */
+  .transfer-item { padding: 12px 16px; border-radius: 8px; border: 1px solid var(--border); background: var(--card); margin-bottom: 8px; }
+  .transfer-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; font-size: 13px; }
+  .transfer-filename { font-weight: 500; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 60%; }
+  .transfer-meta { color: var(--muted); }
+  .transfer-dir { font-size: 12px; padding: 2px 8px; border-radius: 4px; font-weight: 600; }
+  .dir-send { background: rgba(77,155,255,.18); color: var(--send-color); }
+  .dir-recv { background: rgba(78,201,97,.18); color: var(--recv-color); }
+  .progress-bar-wrap { background: var(--border); border-radius: 99px; height: 6px; }
+  .progress-bar { height: 6px; border-radius: 99px; transition: width .2s; min-width: 4px; }
+  .pb-send { background: var(--send-color); }
+  .pb-recv { background: var(--recv-color); }
+  .pb-error { background: var(--error); }
+  .transfer-pct { font-size: 12px; color: var(--muted); margin-top: 5px; text-align: right; }
+
+  /* ── log ── */
+  #log-list { display: flex; flex-direction: column; gap: 5px; max-height: 320px; overflow-y: auto; }
+  .log-item { display: flex; align-items: center; gap: 12px; padding: 8px 12px; border-radius: 6px; background: var(--card); border: 1px solid var(--border); font-size: 13px; }
+  .log-arrow { font-size: 18px; flex-shrink: 0; }
+  .log-sent .log-arrow { color: var(--send-color); }
+  .log-received .log-arrow { color: var(--recv-color); }
+  .log-error .log-arrow { color: var(--error); }
+  .log-fname { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 500; }
+  .log-partner { color: var(--muted); white-space: nowrap; }
+  .log-size { color: var(--muted); white-space: nowrap; }
+  .log-time { color: var(--muted); white-space: nowrap; }
+  .log-empty { color: var(--muted); font-size: 14px; text-align: center; padding: 24px; }
+
+  /* ── status bar ── */
+  #statusbar { position: fixed; bottom: 20px; right: 20px; background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 10px 16px; font-size: 13px; display: none; gap: 10px; align-items: center; }
+  #statusbar.show { display: flex; }
+  .spinner { width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .6s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── modal ── */
+  .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none; align-items: center; justify-content: center; z-index: 100; }
+  .modal-backdrop.show { display: flex; }
+  .modal { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; width: 360px; max-width: 90vw; }
+  .modal h3 { margin-bottom: 18px; font-size: 17px; }
+  .modal-footer { margin-top: 18px; display: flex; gap: 8px; justify-content: flex-end; }
+
+  .empty { color: var(--muted); font-size: 14px; text-align: center; padding: 24px; }
+
+  @media (max-width: 700px) {
+    .top-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>&#128279; LocalSend</h1>
+  <span class="badge" id="device-badge">loading...</span>
+  <span class="badge" id="addr-badge">&#8212;</span>
+  <div class="header-spacer"></div>
+  <button class="btn-icon" onclick="openSettings()">&#9881; Settings</button>
+</header>
+
+<div class="container">
+  <div class="top-grid">
+
+    <!-- Partners -->
+    <div class="card">
+      <div class="card-header">
+        <h2>Partners</h2>
+        <button class="btn btn-sm btn-outline" onclick="openAddPartner()">+ Add</button>
+        <button class="btn btn-sm btn-outline" onclick="pingAll()" title="Refresh status">&#8635;</button>
+      </div>
+      <div class="card-body">
+        <div id="partners-list"><div class="empty">No partners yet</div></div>
+      </div>
+    </div>
+
+    <!-- Send -->
+    <div class="card">
+      <div class="card-header">
+        <h2>Send Files</h2>
+        <button class="btn btn-sm btn-outline" onclick="clearStaged()">Clear</button>
+      </div>
+      <div class="card-body">
+        <div id="dropzone" onclick="document.getElementById('file-input').click()">
+          <div class="dz-icon">&#128196;</div>
+          <p>Drop files here or click to browse</p>
+          <small>Files are uploaded to this machine then forwarded to the partner</small>
+        </div>
+        <input type="file" id="file-input" multiple onchange="handleFileInput(this)">
+        <div id="staged-list"></div>
+        <div class="send-controls" id="send-controls" style="display:none">
+          <select id="partner-select"><option value="">Select partner…</option></select>
+          <button class="btn btn-primary" onclick="queueSend()">&#8594; Send</button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Active Transfers -->
+  <div class="card" id="transfers-card" style="display:none">
+    <div class="card-header"><h2>Active Transfers</h2></div>
+    <div class="card-body"><div id="transfers-list"></div></div>
+  </div>
+
+  <!-- Log -->
+  <div class="card">
+    <div class="card-header">
+      <h2>Activity Log</h2>
+      <span id="log-count" style="font-size:11px;color:var(--muted)"></span>
+    </div>
+    <div class="card-body">
+      <div id="log-list"><div class="log-empty">No activity yet</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- Status bar -->
+<div id="statusbar">
+  <div class="spinner"></div>
+  <span id="status-text">Receiving…</span>
+</div>
+
+<!-- Add Partner Modal -->
+<div class="modal-backdrop" id="add-partner-modal">
+  <div class="modal">
+    <h3>Add Partner</h3>
+    <div class="form-row">
+      <label>Display Name</label>
+      <input id="ap-name" placeholder="e.g. MacBook" />
+    </div>
+    <div class="form-row">
+      <label>IP Address</label>
+      <input id="ap-ip" placeholder="192.168.1.x" />
+    </div>
+    <div class="form-row">
+      <label>Port</label>
+      <input id="ap-port" placeholder="8765" value="8765" />
+    </div>
+    <div id="ap-error" style="color:var(--error);font-size:12px;min-height:16px;margin-top:4px;"></div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal('add-partner-modal')">Cancel</button>
+      <button class="btn btn-primary" id="ap-btn" onclick="submitAddPartner()">Connect</button>
+    </div>
+  </div>
+</div>
+
+<!-- Settings Modal -->
+<div class="modal-backdrop" id="settings-modal">
+  <div class="modal">
+    <h3>&#9881; Settings</h3>
+    <div class="form-row">
+      <label>Device Name</label>
+      <input id="cfg-name" />
+    </div>
+    <div class="form-row">
+      <label>Receive Directory</label>
+      <input id="cfg-dir" />
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal('settings-modal')">Cancel</button>
+      <button class="btn btn-primary" onclick="saveSettings()">Save</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
