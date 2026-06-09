@@ -16,7 +16,6 @@ from sse_starlette.sse import EventSourceResponse
 
 from state import AppState, STAGING_DIR
 
-POLL_INTERVAL = 60  # seconds
 
 
 def get_local_ip() -> str:
@@ -37,7 +36,6 @@ state = AppState()
 @app.on_event("startup")
 async def startup():
     Path(state.config["receive_dir"]).mkdir(parents=True, exist_ok=True)
-    asyncio.create_task(poll_loop())
 
 
 # ── SSE ───────────────────────────────────────────────────────────────────────
@@ -503,18 +501,6 @@ async def _download_file(
                     "error": str(e),
                 },
             )
-
-
-async def poll_loop():
-    while True:
-        await asyncio.sleep(POLL_INTERVAL)
-        if state.is_receiving:
-            continue
-        for partner in list(state.partners):
-            try:
-                await receive_from_partner(partner)
-            except Exception:
-                pass
 
 
 # ── static ────────────────────────────────────────────────────────────────────
