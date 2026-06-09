@@ -498,7 +498,13 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 if __name__ == "__main__":
+    import argparse
     import uvicorn
 
-    port = int(state.config.get("port", 8765))
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--port", type=int, default=None, help="Port to listen on")
+    args = parser.parse_args()
+
+    port = args.port or int(state.config.get("port", 8765))
+    state.update_config({"port": port})  # persist so the UI shows the right port
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
