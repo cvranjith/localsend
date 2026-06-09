@@ -27,6 +27,7 @@ class AppState:
         self._receiving = False
         self.sse_queues: list[asyncio.Queue] = []
         self.active_tasks: dict[str, asyncio.Task] = {}  # transfer_id → task
+        self.partner_last_seen: dict[str, float] = {}    # partner_id → epoch seconds
 
     # ── config ────────────────────────────────────────────────────────────────
 

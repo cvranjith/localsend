@@ -1,6 +1,8 @@
 import asyncio
 import json
 import socket
+import subprocess
+import time
 import urllib.parse
 import uuid
 from pathlib import Path
@@ -141,15 +143,20 @@ async def remove_partner(partner_id: str):
 
 @app.get("/api/partners/ping")
 async def ping_partners():
+    now = time.time()
     results = {}
     async with httpx.AsyncClient(timeout=3) as client:
         async def ping_one(p):
             try:
                 r = await client.get(f"http://{p['ip']}:{p['port']}/api/peer/hello")
-                results[p["id"]] = r.status_code == 200
+                online = r.status_code == 200
             except Exception:
-                results[p["id"]] = False
-
+                online = False
+            last_seen = state.partner_last_seen.get(p["id"])
+            results[p["id"]] = {
+                "online": online,
+                "last_seen_sec": round(now - last_seen) if last_seen else None,
+            }
         await asyncio.gather(*[ping_one(p) for p in state.partners], return_exceptions=True)
     return results
 
@@ -250,6 +257,23 @@ async def get_log():
     return sorted(state.log, key=lambda e: e["ts"], reverse=True)
 
 
+class OpenRequest(BaseModel):
+    path: str
+    type: str = "file"  # "file" or "folder"
+
+
+@app.post("/api/open")
+async def open_path(body: OpenRequest):
+    p = Path(body.path)
+    if not p.exists():
+        raise HTTPException(404, "Path not found")
+    if body.type == "folder":
+        subprocess.Popen(["open", "-R", str(p)])  # reveal in Finder
+    else:
+        subprocess.Popen(["open", str(p)])
+    return {"ok": True}
+
+
 # ── peer endpoints (machine-to-machine) ───────────────────────────────────────
 
 
@@ -260,6 +284,7 @@ def _require_partner(request: Request) -> dict:
     if device_id:
         partner = state.get_partner_by_device_id(device_id)
         if partner:
+            state.partner_last_seen[partner["id"]] = time.time()
             return partner
 
     # Fallback: match by client IP for manually-paired partners with no device_id yet
@@ -268,9 +293,9 @@ def _require_partner(request: Request) -> dict:
         partner = state.get_partner_by_ip(client_ip)
         if partner and not partner.get("device_id"):
             if device_id:
-                # Auto-learn their device_id on first contact
                 partner["device_id"] = device_id
                 state._save_partners()
+            state.partner_last_seen[partner["id"]] = time.time()
             return partner
 
     raise HTTPException(403, "Unknown device — add this device as a partner first")
@@ -336,6 +361,7 @@ async def peer_receive_push(filename: str, request: Request):
         "transfer_id": transfer_id,
         "filename": filename,
         "saved_as": dest.name,
+        "saved_path": str(dest),
         "partner_name": partner["name"],
     })
     return {"ok": True, "saved_as": dest.name}
@@ -495,8 +521,9 @@ async def push_files_to_partner(partner: dict, files: list[dict], transfer_id: s
                 })
                 raise
 
-            except (httpx.ConnectError, httpx.ConnectTimeout):
-                # Partner unreachable — queue file for them to pull when ready
+            except (httpx.NetworkError, httpx.TimeoutException):
+                # Any network-level failure (ConnectError, ReadError, timeout…)
+                # Queue file for them to pull when they next poll us
                 t = state.add_transfer(partner["id"], [file_info])
                 await state.broadcast("send_queued", {
                     "transfer_id": transfer_id,
@@ -628,6 +655,7 @@ async def _download_file(
                     "transfer_id": transfer_id,
                     "filename": filename,
                     "saved_as": dest.name,
+                    "saved_path": str(dest),
                     "partner_name": partner["name"],
                 },
             )

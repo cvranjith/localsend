@@ -3,7 +3,7 @@ let config = {};
 let partners = [];
 let stagedFiles = [];   // {file_id, name, path, size}
 let activeTransfers = {}; // key: `${transfer_id}:${filename}` → DOM element
-let partnerStatus = {};   // partner_id → true/false
+let partnerStatus = {};   // partner_id → {online, last_seen_sec}
 let pollIntervalSec = 60;
 let pollTimer = null;
 let pollSecondsLeft = 0;
@@ -94,24 +94,27 @@ function renderPartners() {
 }
 
 function partnerHTML(p) {
-  const online  = partnerStatus[p.id];
-  const dotCls  = online === true ? "online" : online === false ? "offline" : "";
-  const dotTip  = online === true ? "online"  : online === false ? "offline" : "unknown";
-  const modeBadge = p.reachable
-    ? `<span style="font-size:11px;color:var(--recv-color);background:rgba(78,201,97,.15);padding:1px 6px;border-radius:4px;">push</span>`
-    : `<span style="font-size:11px;color:var(--muted);background:var(--border);padding:1px 6px;border-radius:4px;">pull</span>`;
+  const status       = partnerStatus[p.id] || {};
+  const online       = status.online;
+  const lastSeenSec  = status.last_seen_sec;
+  const recentlyActive = !online && lastSeenSec != null && lastSeenSec < 120;
+
+  const dotCls = online ? "online" : recentlyActive ? "recent" : (online === false ? "offline" : "");
+  const dotTip = online ? "online" : recentlyActive ? `active ${lastSeenSec}s ago` : "offline";
+
+  const modeLabel  = p.reachable ? "server" : "client";
+  const modeBadge  = p.reachable
+    ? `<span class="mode-badge mode-server">${modeLabel}</span>`
+    : `<span class="mode-badge mode-client">${modeLabel}</span>`;
+
   return `
-  <div class="partner-item" id="partner-${p.id}">
+  <div class="partner-item" id="partner-${p.id}" onclick="syncPartner('${p.id}')" title="Click to sync: send staged files + check for incoming">
     <div class="status-dot ${dotCls}" title="${dotTip}"></div>
     <div class="partner-info">
       <div class="partner-name">${esc(p.name)} ${modeBadge}</div>
       <div class="partner-addr">${esc(p.ip)}:${p.port}</div>
     </div>
-    <div class="partner-actions">
-      <button class="btn btn-sm btn-outline" onclick="sendToPartner('${p.id}')" title="Send staged files to this partner">&#8594; Send</button>
-      <button class="btn btn-sm btn-outline" onclick="receiveFromPartner('${p.id}')" title="Check if partner has files for you">&#8595; Recv</button>
-      <button class="btn btn-sm btn-danger"  onclick="removePartner('${p.id}')">&#10005;</button>
-    </div>
+    <button class="btn btn-sm btn-danger" onclick="event.stopPropagation();removePartner('${p.id}')" title="Remove partner">&#10005;</button>
   </div>`;
 }
 
@@ -168,10 +171,14 @@ async function pingAll() {
     const res = await GET("/api/partners/ping");
     partnerStatus = res;
     partners.forEach(p => {
+      const status = res[p.id] || {};
+      const online = status.online;
+      const lastSeenSec = status.last_seen_sec;
+      const recentlyActive = !online && lastSeenSec != null && lastSeenSec < 120;
       const dot = document.querySelector(`#partner-${p.id} .status-dot`);
       if (!dot) return;
-      dot.className = "status-dot " + (res[p.id] ? "online" : "offline");
-      dot.title     = res[p.id] ? "online" : "offline";
+      dot.className = "status-dot " + (online ? "online" : recentlyActive ? "recent" : "offline");
+      dot.title = online ? "online" : recentlyActive ? `active ${lastSeenSec}s ago` : "offline";
     });
   } catch {}
 }
@@ -235,6 +242,7 @@ function connectSSE() {
       const key = `${data.transfer_id}:${data.filename}`;
       completeTransferBar(key, `saved as ${data.saved_as}`);
       setTimeout(() => removeTransferBar(key), 3000);
+      showToast(data);
     }
     else if (type === "receive_error") {
       const key = `${data.transfer_id}:${data.filename}`;
@@ -290,10 +298,29 @@ function renderStaged() {
 function removeStagedFile(idx) { stagedFiles.splice(idx, 1); renderStaged(); }
 function clearStaged()          { stagedFiles = []; renderStaged(); }
 
-// ── send / receive ────────────────────────────────────────────────────────────
+async function pasteFromClipboard() {
+  try {
+    const text = await navigator.clipboard.readText();
+    if (!text.trim()) { alert("Clipboard is empty or contains no text."); return; }
+    const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const blob = new Blob([text], { type: "text/plain" });
+    const file = new File([blob], `clipboard_${ts}.txt`, { type: "text/plain" });
+    uploadFiles([file]);
+  } catch (e) {
+    alert("Could not read clipboard: " + e.message);
+  }
+}
+
+// ── sync (send + receive combined) ───────────────────────────────────────────
+async function syncPartner(partnerId) {
+  if (stagedFiles.length) {
+    await sendToPartner(partnerId);
+  }
+  await receiveFromPartner(partnerId);
+}
+
 async function sendToPartner(partnerId) {
-  if (!stagedFiles.length) { alert("Drop some files first."); return; }
-  const partner = partners.find(p => p.id === partnerId);
+  if (!stagedFiles.length) return;
   try {
     await POST("/api/send", { partner_id: partnerId, files: stagedFiles });
     stagedFiles = [];
@@ -304,7 +331,6 @@ async function sendToPartner(partnerId) {
 }
 
 async function receiveFromPartner(partnerId) {
-  const partner = partners.find(p => p.id === partnerId);
   try {
     await POST(`/api/receive/${partnerId}`);
   } catch (e) {
@@ -316,12 +342,61 @@ async function abortTransfer(transferId) {
   try { await POST(`/api/abort/${transferId}`); } catch {}
 }
 
+// ── open file / folder ────────────────────────────────────────────────────────
+async function openFile(path) {
+  try { await POST("/api/open", { path, type: "file" }); }
+  catch (e) { alert("Open failed: " + e.message); }
+}
+
+async function openFolder(path) {
+  try { await POST("/api/open", { path, type: "folder" }); }
+  catch (e) { alert("Open failed: " + e.message); }
+}
+
+// ── toasts ────────────────────────────────────────────────────────────────────
+function showToast(data) {
+  const container = document.getElementById("toast-container");
+  const id = `toast-${Date.now()}`;
+  const div = document.createElement("div");
+  div.className = "toast";
+  div.id = id;
+  let countdown = 30;
+
+  const openBtns = data.saved_path ? `
+    <button class="btn btn-sm btn-outline" onclick="openFile(${JSON.stringify(data.saved_path)})">Open</button>
+    <button class="btn btn-sm btn-outline" onclick="openFolder(${JSON.stringify(data.saved_path)})">Show in Folder</button>` : "";
+
+  div.innerHTML = `
+    <div class="toast-title">&#8595; File received</div>
+    <div class="toast-filename" title="${esc(data.saved_as || data.filename)}">${esc(data.saved_as || data.filename)}</div>
+    <div class="toast-from">from ${esc(data.partner_name)}</div>
+    <div class="toast-actions">
+      ${openBtns}
+      <span class="toast-timer" id="${id}-timer">${countdown}s</span>
+      <button class="btn btn-sm btn-danger" onclick="dismissToast('${id}')">&#10005;</button>
+    </div>`;
+
+  container.appendChild(div);
+
+  const timer = setInterval(() => {
+    countdown--;
+    const timerEl = document.getElementById(`${id}-timer`);
+    if (timerEl) timerEl.textContent = countdown + "s";
+    if (countdown <= 0) { clearInterval(timer); dismissToast(id); }
+  }, 1000);
+  div._timer = timer;
+}
+
+function dismissToast(id) {
+  const el = document.getElementById(id);
+  if (el) { clearInterval(el._timer); el.remove(); }
+}
+
 // ── auto-poll ─────────────────────────────────────────────────────────────────
 function startPollTimer() {
   if (pollTimer) clearInterval(pollTimer);
   pollSecondsLeft = pollIntervalSec;
   updatePollBadge();
-  // Countdown tick every second
   pollTimer = setInterval(async () => {
     pollSecondsLeft--;
     updatePollBadge();
