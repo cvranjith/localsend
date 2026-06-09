@@ -145,19 +145,27 @@ async def remove_partner(partner_id: str):
 async def ping_partners():
     now = time.time()
     results = {}
+    reachable_changed = False
     async with httpx.AsyncClient(timeout=3) as client:
         async def ping_one(p):
+            nonlocal reachable_changed
             try:
                 r = await client.get(f"http://{p['ip']}:{p['port']}/api/peer/hello")
                 online = r.status_code == 200
             except Exception:
                 online = False
+            if online and not p.get("reachable"):
+                p["reachable"] = True
+                reachable_changed = True
             last_seen = state.partner_last_seen.get(p["id"])
             results[p["id"]] = {
                 "online": online,
                 "last_seen_sec": round(now - last_seen) if last_seen else None,
             }
         await asyncio.gather(*[ping_one(p) for p in state.partners], return_exceptions=True)
+    if reachable_changed:
+        state._save_partners()
+        await state.broadcast("partners_update", state.partners)
     return results
 
 
