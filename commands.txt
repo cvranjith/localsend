@@ -1,0 +1,22 @@
+── First-time setup ──────────────────────────────────────────────────────────
+
+  python3 -m venv .venv          # create local venv
+  source .venv/bin/activate      # activate it
+  pip install -r requirements.txt  # install deps
+  python3 main.py                # run the server
+
+── Every subsequent session ─────────────────────────────────────────────────
+
+  git pull                       # get latest code
+  source .venv/bin/activate      # activate venv
+  pip install -r requirements.txt  # pick up any new deps
+  python3 main.py                # run the server
+
+── When done ────────────────────────────────────────────────────────────────
+
+  deactivate                     # exit venv
+
+── Open in browser ──────────────────────────────────────────────────────────
+
+  http://localhost:8765
+
