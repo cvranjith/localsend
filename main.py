@@ -35,9 +35,67 @@ app = FastAPI(title="LocalSend")
 state = AppState()
 
 
+class _DiscoveryResponder(asyncio.DatagramProtocol):
+    """Answers UDP broadcast discovery queries with this device's identity."""
+
+    def connection_made(self, transport):
+        self.transport = transport
+
+    def datagram_received(self, data: bytes, addr):
+        try:
+            msg = json.loads(data.decode())
+        except Exception:
+            return
+        if msg.get("type") != "localsend_discover":
+            return
+        reply = json.dumps({
+            "type": "localsend_hello",
+            "device_id": state.device_id,
+            "name": state.config["device_name"],
+            "port": state.config["port"],
+        }).encode()
+        self.transport.sendto(reply, addr)
+
+
+class _DiscoveryClientProtocol(asyncio.DatagramProtocol):
+    def __init__(self):
+        self.replies: list[tuple[dict, tuple]] = []
+
+    def datagram_received(self, data: bytes, addr):
+        try:
+            self.replies.append((json.loads(data.decode()), addr))
+        except Exception:
+            pass
+
+
+async def _udp_discover(target_port: int, timeout: float = 1.5) -> list[tuple[dict, tuple]]:
+    """Broadcasts a discovery query on target_port and collects replies for `timeout` seconds."""
+    loop = asyncio.get_running_loop()
+    transport, protocol = await loop.create_datagram_endpoint(
+        _DiscoveryClientProtocol,
+        local_addr=("0.0.0.0", 0),
+        allow_broadcast=True,
+    )
+    try:
+        msg = json.dumps({"type": "localsend_discover", "from": state.device_id}).encode()
+        transport.sendto(msg, ("255.255.255.255", target_port))
+        await asyncio.sleep(timeout)
+        return protocol.replies
+    finally:
+        transport.close()
+
+
 @app.on_event("startup")
 async def startup():
     Path(state.config["receive_dir"]).mkdir(parents=True, exist_ok=True)
+    loop = asyncio.get_running_loop()
+    try:
+        await loop.create_datagram_endpoint(
+            _DiscoveryResponder,
+            local_addr=("0.0.0.0", state.config["port"]),
+        )
+    except OSError:
+        pass  # UDP port unavailable — discovery replies just won't work, HTTP server is unaffected
 
 
 # ── SSE ───────────────────────────────────────────────────────────────────────
@@ -141,6 +199,56 @@ async def remove_partner(partner_id: str):
     return {"ok": True}
 
 
+@app.post("/api/partners/{partner_id}/discover")
+async def discover_partner(partner_id: str):
+    """Re-locate a partner whose IP changed: recheck its last known address, then
+    fall back to a UDP broadcast on its known port (no per-host scanning)."""
+    partner = state.get_partner(partner_id)
+    if not partner:
+        raise HTTPException(404, "Partner not found")
+
+    target_device_id = partner.get("device_id")
+    target_name = partner["name"].strip().lower()
+
+    def matches(remote: dict) -> bool:
+        remote_id = remote.get("device_id")
+        remote_name = (remote.get("name") or "").strip().lower()
+        return (target_device_id and remote_id == target_device_id) or remote_name == target_name
+
+    hit = None
+
+    # Fast path: maybe it's still (or again) at its last known address
+    try:
+        async with httpx.AsyncClient(timeout=1.5) as client:
+            resp = await client.get(f"http://{partner['ip']}:{partner['port']}/api/peer/hello")
+            if resp.status_code == 200:
+                remote = resp.json()
+                if matches(remote):
+                    hit = {"ip": partner["ip"], "port": partner["port"], **remote}
+    except Exception:
+        pass
+
+    # Fallback: broadcast a discovery query on the partner's known port and listen for replies
+    if not hit:
+        for remote, addr in await _udp_discover(partner["port"]):
+            if remote.get("type") == "localsend_hello" and matches(remote):
+                hit = {"ip": addr[0], "port": remote.get("port", partner["port"]), **remote}
+                break
+
+    if not hit:
+        return {"found": False}
+
+    changed = hit["ip"] != partner["ip"] or hit["port"] != partner["port"]
+    partner["ip"] = hit["ip"]
+    partner["port"] = hit["port"]
+    if hit.get("device_id"):
+        partner["device_id"] = hit["device_id"]
+    partner["reachable"] = True
+    state._save_partners()
+    await state.broadcast("partners_update", state.partners)
+    return {"found": True, "ip": hit["ip"], "port": hit["port"], "changed": changed}
+
+
 @app.get("/api/partners/ping")
 async def ping_partners():
     now = time.time()
@@ -187,8 +295,43 @@ async def upload_files(files: list[UploadFile] = File(...)):
             "name": safe_name,
             "path": str(dest),
             "size": dest.stat().st_size,
+            "origin": "staged",
         })
     return results
+
+
+@app.get("/api/browse")
+async def browse_dir(path: str = ""):
+    """List a directory on the server's own filesystem, so a file can be
+    queued for sending by path without first uploading its bytes through
+    the browser."""
+    p = Path(path).expanduser() if path else Path.home()
+    try:
+        p = p.resolve()
+    except (OSError, RuntimeError):
+        raise HTTPException(400, "Invalid path")
+    if not p.exists() or not p.is_dir():
+        raise HTTPException(404, "Not a directory")
+
+    entries = []
+    try:
+        for child in p.iterdir():
+            try:
+                is_dir = child.is_dir()
+                entries.append({
+                    "name": child.name,
+                    "path": str(child),
+                    "is_dir": is_dir,
+                    "size": None if is_dir else child.stat().st_size,
+                })
+            except OSError:
+                continue  # broken symlink, permission error on stat, etc.
+    except PermissionError:
+        raise HTTPException(403, "Permission denied")
+
+    entries.sort(key=lambda e: (not e["is_dir"], e["name"].lower()))
+    parent = str(p.parent) if p.parent != p else None
+    return {"path": str(p), "parent": parent, "entries": entries}
 
 
 # ── outbox (for pull-side: partner queues here, we pull on Receive) ───────────
@@ -204,7 +347,8 @@ async def cancel_outbox_entry(transfer_id: str):
     t = state.get_transfer(transfer_id)
     if t:
         for f in t.get("files", []):
-            Path(f["path"]).unlink(missing_ok=True)
+            if f.get("origin") != "browsed":
+                Path(f["path"]).unlink(missing_ok=True)
     state.remove_transfer(transfer_id)
     await state.broadcast("outbox_update", state.outbox)
     return {"ok": True}
@@ -225,7 +369,10 @@ async def send_to_partner(body: SendRequest):
         raise HTTPException(404, "Partner not found")
 
     transfer_id = str(uuid.uuid4())
-    file_list = [{"path": f["path"], "name": f["name"], "size": f["size"]} for f in body.files]
+    file_list = [
+        {"path": f["path"], "name": f["name"], "size": f["size"], "origin": f.get("origin", "staged")}
+        for f in body.files
+    ]
 
     await state.broadcast("send_start", {
         "transfer_id": transfer_id,
@@ -469,7 +616,7 @@ async def peer_serve_file(transfer_id: str, filename: str, request: Request):
 async def peer_ack_file(transfer_id: str, filename: str, request: Request):
     partner = _require_partner(request)
     file_info = state.ack_file(transfer_id, filename)
-    if file_info and file_info.get("path"):
+    if file_info and file_info.get("path") and file_info.get("origin") != "browsed":
         Path(file_info["path"]).unlink(missing_ok=True)  # staging copy no longer needed
     await state.broadcast("outbox_update", state.outbox)
     # Let the sender UI know the queued file was pulled successfully
@@ -552,7 +699,8 @@ async def push_files_to_partner(partner: dict, files: list[dict], transfer_id: s
                 await state.broadcast("send_complete", {
                     "transfer_id": transfer_id, "filename": filename,
                 })
-                file_path.unlink(missing_ok=True)  # staging copy no longer needed
+                if file_info.get("origin") != "browsed":
+                    file_path.unlink(missing_ok=True)  # staging copy no longer needed
 
             except asyncio.CancelledError:
                 await state.broadcast("send_cancelled", {
@@ -584,14 +732,14 @@ async def push_files_to_partner(partner: dict, files: list[dict], transfer_id: s
 
 async def receive_from_partner(partner: dict):
     # No await between check and set — safe in single-threaded asyncio
-    if state.is_receiving:
+    if state.is_receiving_from(partner["id"]):
         return
-    state.set_receiving(True)
-    await state.broadcast("status", {"receiving": True, "partner": partner["name"]})
+    state.set_receiving(partner["id"], True)
+    announced = False
 
     try:
         base_url = f"http://{partner['ip']}:{partner['port']}"
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=3) as client:
             resp = await client.get(
                 f"{base_url}/api/peer/check",
                 headers={"X-Device-ID": state.device_id},
@@ -602,6 +750,10 @@ async def receive_from_partner(partner: dict):
             if not transfers:
                 return
 
+        # Only announce "receiving" now that we know there's actually something to pull
+        announced = True
+        await state.broadcast("status", {"receiving": True, "partner": partner["name"]})
+
         receive_dir = Path(state.config["receive_dir"])
         receive_dir.mkdir(parents=True, exist_ok=True)
 
@@ -609,9 +761,12 @@ async def receive_from_partner(partner: dict):
             await _receive_transfer(partner, transfer, base_url, receive_dir)
 
     except Exception as e:
-        await state.broadcast("status", {"receiving": False, "error": str(e)})
+        if announced:
+            await state.broadcast("status", {"receiving": False, "error": str(e)})
     finally:
-        state.set_receiving(False)
+        state.set_receiving(partner["id"], False)
+        if announced:
+            await state.broadcast("status", {"receiving": False})
         await state.broadcast("status", {"receiving": False})
 
 

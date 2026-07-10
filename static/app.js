@@ -114,6 +114,7 @@ function partnerHTML(p) {
       <div class="partner-name">${esc(p.name)} ${modeBadge}</div>
       <div class="partner-addr">${esc(p.ip)}:${p.port}</div>
     </div>
+    <button class="btn btn-sm btn-outline discover-btn" id="discover-${p.id}" onclick="event.stopPropagation();discoverPartner('${p.id}')" title="Find this partner on the network if its address changed">&#128269;</button>
     <button class="btn btn-sm btn-danger" onclick="event.stopPropagation();removePartner('${p.id}')" title="Remove partner">&#10005;</button>
   </div>`;
 }
@@ -170,6 +171,26 @@ async function removePartner(id) {
   await DEL(`/api/partners/${id}`);
   partners = partners.filter(p => p.id !== id);
   renderPartners();
+}
+
+async function discoverPartner(id) {
+  const btn = document.getElementById(`discover-${id}`);
+  if (btn) { btn.disabled = true; btn.textContent = "…"; }
+  try {
+    const res = await POST(`/api/partners/${id}/discover`, {});
+    if (res.found) {
+      if (res.changed) {
+        alert(`Found it — address updated to ${res.ip}:${res.port}`);
+      }
+      pingAll();
+    } else {
+      alert("Couldn't find this partner on the network. Make sure it's powered on and connected.");
+    }
+  } catch (e) {
+    alert(`Discover failed: ${e.message}`);
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = "&#128269;"; }
+  }
 }
 
 // Shared status resolution used by both partnerHTML and pingAll
@@ -323,6 +344,7 @@ function renderStaged() {
   list.innerHTML = stagedFiles.map((f, i) => `
     <div class="staged-file">
       <span class="fname" title="${esc(f.name)}">${esc(f.name)}</span>
+      ${f.origin === "browsed" ? '<span class="mode-badge mode-server" title="Sent straight from disk on this machine — not uploaded">server</span>' : ""}
       <span class="fsize">${fmtSize(f.size)}</span>
       <button class="staged-remove" onclick="removeStagedFile(${i})">&#10005;</button>
     </div>`).join("");
@@ -332,17 +354,142 @@ function renderStaged() {
 function removeStagedFile(idx) { stagedFiles.splice(idx, 1); renderStaged(); }
 function clearStaged()          { stagedFiles = []; renderStaged(); }
 
+function tsStamp() { return new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19); }
+
+function textToFile(text) {
+  return new File([new Blob([text], { type: "text/plain" })], `clipboard_${tsStamp()}.txt`, { type: "text/plain" });
+}
+
 async function pasteFromClipboard() {
   try {
+    if (navigator.clipboard.read) {
+      try {
+        const items = await navigator.clipboard.read();
+        const files = [];
+        let text = null;
+        for (const item of items) {
+          for (const type of item.types) {
+            if (type.startsWith("image/")) {
+              const blob = await item.getType(type);
+              const ext = (type.split("/")[1] || "png").replace("jpeg", "jpg");
+              files.push(new File([blob], `clipboard_${tsStamp()}.${ext}`, { type }));
+            } else if (type === "text/plain" && text === null) {
+              text = await (await item.getType(type)).text();
+            }
+          }
+        }
+        if (files.length)       { uploadFiles(files); return; }
+        if (text && text.trim()) { uploadFiles([textToFile(text)]); return; }
+      } catch { /* clipboard.read() unsupported/denied — fall back below */ }
+    }
     const text = await navigator.clipboard.readText();
-    if (!text.trim()) { alert("Clipboard is empty or contains no text."); return; }
-    const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-    const blob = new Blob([text], { type: "text/plain" });
-    const file = new File([blob], `clipboard_${ts}.txt`, { type: "text/plain" });
-    uploadFiles([file]);
+    if (!text.trim()) { alert("Clipboard is empty or contains no text or images."); return; }
+    uploadFiles([textToFile(text)]);
   } catch (e) {
     alert("Could not read clipboard: " + e.message);
   }
+}
+
+// Global Cmd+V / Ctrl+V — works anywhere on the page, without stealing normal
+// text paste from input fields (only intercepts when the clipboard has files).
+document.addEventListener("paste", (e) => {
+  const items = e.clipboardData?.items;
+  if (!items) return;
+  const files = [];
+  for (const item of items) {
+    if (item.kind === "file") {
+      const f = item.getAsFile();
+      if (f) files.push(f);
+    }
+  }
+  if (!files.length) return; // no files on clipboard — let native paste (e.g. into a text field) proceed
+  e.preventDefault();
+  uploadFiles(files.map(f => {
+    if (f.name && f.name !== "image.png" && f.name !== "blob") return f;
+    const ext = (f.type.split("/")[1] || "bin").replace("jpeg", "jpg");
+    return new File([f], `clipboard_${tsStamp()}.${ext}`, { type: f.type });
+  }));
+});
+
+// ── browse (server-side file picker) ─────────────────────────────────────────
+const BROWSE_LAST_PATH_KEY = "localsend_browse_path";
+let browseState = { path: null, parent: null, entries: [] };
+let browseSelected = new Map(); // path → {name, path, size}
+
+async function openBrowseModal() {
+  browseSelected = new Map();
+  await browseTo(localStorage.getItem(BROWSE_LAST_PATH_KEY) || "");
+  openModal("browse-modal");
+}
+
+async function browseTo(path) {
+  try {
+    const res = await GET(`/api/browse?path=${encodeURIComponent(path || "")}`);
+    browseState = res;
+    localStorage.setItem(BROWSE_LAST_PATH_KEY, res.path);
+    renderBrowse();
+  } catch (e) {
+    alert("Browse failed: " + e.message);
+  }
+}
+
+function browseUp() {
+  if (browseState.parent) browseTo(browseState.parent);
+}
+
+function renderBrowse() {
+  document.getElementById("browse-path-input").value = browseState.path;
+  document.getElementById("browse-up-btn").disabled = !browseState.parent;
+
+  const list = document.getElementById("browse-list");
+  if (!browseState.entries.length) {
+    list.innerHTML = '<div class="empty">Empty folder</div>';
+  } else {
+    list.innerHTML = browseState.entries.map(e => {
+      if (e.is_dir) {
+        return `
+        <div class="browse-item browse-dir" onclick="browseTo('${escAttr(e.path)}')">
+          <span class="browse-icon">&#128193;</span>
+          <span class="browse-name" title="${esc(e.name)}">${esc(e.name)}</span>
+        </div>`;
+      }
+      const checked = browseSelected.has(e.path) ? "checked" : "";
+      return `
+      <div class="browse-item">
+        <input type="checkbox" ${checked} onchange="toggleBrowseSelect('${escAttr(e.path)}', '${escAttr(e.name)}', ${e.size}, this.checked)">
+        <span class="browse-icon">&#128196;</span>
+        <span class="browse-name" title="${esc(e.name)}">${esc(e.name)}</span>
+        <span class="browse-size">${fmtSize(e.size)}</span>
+      </div>`;
+    }).join("");
+  }
+  updateBrowseSelectionUI();
+}
+
+function toggleBrowseSelect(path, name, size, checked) {
+  if (checked) browseSelected.set(path, { name, path, size });
+  else browseSelected.delete(path);
+  updateBrowseSelectionUI();
+}
+
+function updateBrowseSelectionUI() {
+  const n = browseSelected.size;
+  document.getElementById("browse-selected-count").textContent = n ? `${n} selected` : "";
+  document.getElementById("browse-add-btn").disabled = !n;
+}
+
+function addBrowseSelection() {
+  for (const f of browseSelected.values()) {
+    stagedFiles.push({
+      file_id: `browsed-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      name: f.name,
+      path: f.path,
+      size: f.size,
+      origin: "browsed",
+    });
+  }
+  renderStaged();
+  closeModal("browse-modal");
 }
 
 // ── sync (send + receive combined) ───────────────────────────────────────────
@@ -647,6 +794,10 @@ document.querySelectorAll(".modal-backdrop").forEach(el => {
 // ── utils ─────────────────────────────────────────────────────────────────────
 function esc(s) {
   return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+// Escapes a value for use inside a single-quoted JS string literal embedded in an HTML attribute
+function escAttr(s) {
+  return esc(String(s ?? "").replace(/\\/g, "\\\\").replace(/'/g, "\\'"));
 }
 function safeId(s) { return s.replace(/[^a-z0-9]/gi, "_"); }
 function fmtSize(b) {

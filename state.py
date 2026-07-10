@@ -24,7 +24,7 @@ class AppState:
         self._load_outbox()
         self._load_log()
         self.file_semaphore = asyncio.Semaphore(6)
-        self._receiving = False
+        self._receiving_partners: set[str] = set()
         self.sse_queues: list[asyncio.Queue] = []
         self.active_tasks: dict[str, asyncio.Task] = {}  # transfer_id → task
         self.partner_last_seen: dict[str, float] = {}    # partner_id → epoch seconds
@@ -174,12 +174,14 @@ class AppState:
 
     # ── busy flag ─────────────────────────────────────────────────────────────
 
-    @property
-    def is_receiving(self) -> bool:
-        return self._receiving
+    def is_receiving_from(self, partner_id: str) -> bool:
+        return partner_id in self._receiving_partners
 
-    def set_receiving(self, val: bool):
-        self._receiving = val
+    def set_receiving(self, partner_id: str, val: bool):
+        if val:
+            self._receiving_partners.add(partner_id)
+        else:
+            self._receiving_partners.discard(partner_id)
 
     # ── SSE ───────────────────────────────────────────────────────────────────
 

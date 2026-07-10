@@ -175,6 +175,19 @@
 
   .empty { color: var(--muted); font-size: 14px; text-align: center; padding: 24px; }
 
+  /* ── browse modal ── */
+  .browse-toolbar { display: flex; gap: 6px; margin-bottom: 12px; }
+  .browse-toolbar input { font-family: monospace; font-size: 13px; }
+  .browse-list { max-height: 340px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--card); }
+  .browse-item { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-bottom: 1px solid var(--border); font-size: 14px; }
+  .browse-item input[type="checkbox"] { flex: 0 0 auto; width: auto; padding: 0; }
+  .browse-item:last-child { border-bottom: none; }
+  .browse-dir { cursor: pointer; }
+  .browse-dir:hover { background: rgba(77,155,255,.08); }
+  .browse-icon { flex-shrink: 0; }
+  .browse-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .browse-size { color: var(--muted); font-size: 12px; flex-shrink: 0; }
+
   @media (max-width: 700px) {
     .top-grid { grid-template-columns: 1fr; }
   }
@@ -201,7 +214,8 @@
     <div class="card">
       <div class="card-header">
         <h2>Files</h2>
-        <button class="btn btn-sm btn-outline" onclick="pasteFromClipboard()" title="Paste text from clipboard as .txt file">&#128203; Paste</button>
+        <button class="btn btn-sm btn-outline" onclick="pasteFromClipboard()" title="Paste text, image, or file from clipboard (&#8984;V / Ctrl+V also works anywhere)">&#128203; Paste</button>
+        <button class="btn btn-sm btn-outline" onclick="openBrowseModal()" title="Pick a file already on this machine — sent straight from disk, no upload copy">&#128193; Browse</button>
         <button class="btn btn-sm btn-outline" onclick="clearStaged()">Clear</button>
       </div>
       <div class="card-body">
@@ -277,6 +291,24 @@
     <div class="modal-footer">
       <button class="btn btn-outline" onclick="closeModal('add-partner-modal')">Cancel</button>
       <button class="btn btn-primary" id="ap-btn" onclick="submitAddPartner()">Save Partner</button>
+    </div>
+  </div>
+</div>
+
+<!-- Browse Server Files Modal -->
+<div class="modal-backdrop" id="browse-modal">
+  <div class="modal" style="width:480px;">
+    <h3>&#128193; Browse Server Files</h3>
+    <div class="browse-toolbar">
+      <button class="btn btn-sm btn-outline" id="browse-up-btn" onclick="browseUp()" title="Up one level">&#8593;</button>
+      <input id="browse-path-input" onkeydown="if(event.key==='Enter') browseTo(this.value)">
+      <button class="btn btn-sm btn-outline" onclick="browseTo(document.getElementById('browse-path-input').value)">Go</button>
+    </div>
+    <div id="browse-list" class="browse-list"></div>
+    <div class="modal-footer">
+      <span id="browse-selected-count" style="margin-right:auto;font-size:12px;color:var(--muted);align-self:center;"></span>
+      <button class="btn btn-outline" onclick="closeModal('browse-modal')">Cancel</button>
+      <button class="btn btn-primary" id="browse-add-btn" onclick="addBrowseSelection()" disabled>Add Selected</button>
     </div>
   </div>
 </div>
