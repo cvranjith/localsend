@@ -19,6 +19,10 @@ from state import AppState, STAGING_DIR
 
 
 
+def _log(msg: str):
+    print(f"[localsend] {msg}", flush=True)
+
+
 async def _hello_check(client: httpx.AsyncClient, ip: str, port: int) -> Optional[dict]:
     """GETs /api/peer/hello at ip:port, self-identifying with our own name/port
     (and, if we're a client, our ping frequency so the callee can register us).
@@ -67,6 +71,7 @@ class _DiscoveryResponder(asyncio.DatagramProtocol):
             return
         if msg.get("type") != "localsend_discover":
             return
+        _log(f"discovery: got broadcast query from {addr[0]}:{addr[1]} — replying")
         caller_id = msg.get("from")
         if caller_id:
             caller = state.get_partner_by_device_id(caller_id)
@@ -101,9 +106,12 @@ async def _udp_discover(target_port: int, timeout: float = 1.5) -> list[tuple[di
         allow_broadcast=True,
     )
     try:
+        _log(f"discover: broadcasting on 255.255.255.255:{target_port}, listening {timeout}s")
         msg = json.dumps({"type": "localsend_discover", "from": state.device_id}).encode()
         transport.sendto(msg, ("255.255.255.255", target_port))
         await asyncio.sleep(timeout)
+        summary = ", ".join(f"{addr[0]} ({reply.get('name')})" for reply, addr in protocol.replies)
+        _log(f"discover: broadcast got {len(protocol.replies)} reply(ies){': ' + summary if summary else ''}")
         return protocol.replies
     finally:
         transport.close()
@@ -229,13 +237,56 @@ async def remove_partner(partner_id: str):
     return {"ok": True}
 
 
+async def _scan_subnet(port: int, matches, start_octet: int) -> Optional[dict]:
+    """Sequentially probes the local /24 on `port`, nearest to start_octet first, so a
+    one-hop IP change (a common DHCP-lease bump) is usually found within the first
+    couple of tries. Last-resort fallback for when broadcast discovery gets no
+    replies (AP/client isolation, a firewall silently dropping the UDP query, etc)."""
+    local_ip = get_local_ip()
+    prefix = ".".join(local_ip.split(".")[:3])
+    order = sorted(range(1, 255), key=lambda i: abs(i - start_octet))
+
+    _log(f"discover: broadcast got no match — falling back to a sequential scan of "
+         f"{prefix}.0/24 on port {port}, nearest to .{start_octet} first ({len(order)} hosts)")
+
+    sem = asyncio.Semaphore(24)
+    stop = asyncio.Event()
+    found: dict = {}
+    tried = {"n": 0}
+
+    async def probe(i: int):
+        if stop.is_set():
+            return
+        ip = f"{prefix}.{i}"
+        if ip == local_ip:
+            return
+        async with sem:
+            if stop.is_set():
+                return
+            async with httpx.AsyncClient(timeout=0.6) as client:
+                remote = await _hello_check(client, ip, port)
+            tried["n"] += 1
+            if remote and matches(remote):
+                _log(f"discover: scan matched {ip}:{port} ({remote.get('name')}) after {tried['n']} hosts tried")
+                found["hit"] = {"ip": ip, "port": port, **remote}
+                stop.set()
+
+    await asyncio.gather(*[probe(i) for i in order], return_exceptions=True)
+    if "hit" not in found:
+        _log(f"discover: scan exhausted {tried['n']} hosts on {prefix}.0/24:{port} — not found")
+    return found.get("hit")
+
+
 @app.post("/api/partners/{partner_id}/discover")
 async def discover_partner(partner_id: str):
-    """Re-locate a partner whose IP changed: recheck its last known address, then
-    fall back to a UDP broadcast on its known port (no per-host scanning)."""
+    """Re-locate a partner whose IP changed: recheck its last known address, try a
+    UDP broadcast on its known port, then fall back to actually probing hosts on
+    the local subnet (nearest to the last known IP first) if that finds nothing."""
     partner = state.get_partner(partner_id)
     if not partner:
         raise HTTPException(404, "Partner not found")
+
+    _log(f"discover: starting for '{partner['name']}', last known {partner['ip']}:{partner['port']}")
 
     target_device_id = partner.get("device_id")
     target_name = partner["name"].strip().lower()
@@ -251,7 +302,12 @@ async def discover_partner(partner_id: str):
     async with httpx.AsyncClient(timeout=1.5) as client:
         remote = await _hello_check(client, partner["ip"], partner["port"])
     if remote and matches(remote):
+        _log(f"discover: still at its last known address {partner['ip']}:{partner['port']}")
         hit = {"ip": partner["ip"], "port": partner["port"], **remote}
+    elif remote:
+        _log(f"discover: {partner['ip']}:{partner['port']} answered but as a different device — ignoring")
+    else:
+        _log(f"discover: {partner['ip']}:{partner['port']} unreachable, trying broadcast")
 
     # Fallback: broadcast a discovery query on the partner's known port and listen for replies
     if not hit:
@@ -260,10 +316,20 @@ async def discover_partner(partner_id: str):
                 hit = {"ip": addr[0], "port": remote.get("port", partner["port"]), **remote}
                 break
 
+    # Last resort: actually probe hosts on the subnet, closest to the last known IP first
     if not hit:
+        try:
+            start_octet = int(partner["ip"].split(".")[-1])
+        except ValueError:
+            start_octet = 1
+        hit = await _scan_subnet(partner["port"], matches, start_octet)
+
+    if not hit:
+        _log(f"discover: gave up, could not locate '{partner['name']}'")
         return {"found": False}
 
     changed = hit["ip"] != partner["ip"] or hit["port"] != partner["port"]
+    _log(f"discover: found '{partner['name']}' at {hit['ip']}:{hit['port']} (changed={changed})")
     partner["ip"] = hit["ip"]
     partner["port"] = hit["port"]
     if hit.get("device_id"):

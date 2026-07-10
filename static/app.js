@@ -136,19 +136,13 @@ function partnerHTML(p) {
     ? `<span class="mode-badge mode-server">${modeLabel}</span>`
     : `<span class="mode-badge mode-client">${modeLabel}</span>`;
 
-  // Discovery only matters for a client relocating a server whose IP changed —
-  // a server's clients self-report their current address on every ping, so it's moot here.
-  const discoverBtn = config.role === "client" ? `
-    <button class="btn btn-sm btn-outline discover-btn" id="discover-${p.id}" onclick="event.stopPropagation();discoverPartner('${p.id}')" title="Find this partner on the network if its address changed">&#128269;</button>` : "";
-
   return `
-  <div class="partner-item" id="partner-${p.id}" onclick="syncPartner('${p.id}')" title="Click to sync: ping + send staged files + check for incoming">
-    <div class="status-dot ${dotCls}" title="${dotTip}"></div>
+  <div class="partner-item" id="partner-${p.id}" onclick="syncPartner('${p.id}')" title="Click to sync: ping (scanning to relocate it if unreachable) + send staged files + check for incoming">
+    <div class="status-dot ${dotCls}" id="dot-${p.id}" title="${dotTip}"></div>
     <div class="partner-info">
       <div class="partner-name">${esc(p.name)} ${modeBadge}</div>
       <div class="partner-addr">${esc(p.ip)}:${p.port}</div>
     </div>
-    ${discoverBtn}
     <button class="btn btn-sm btn-danger" onclick="event.stopPropagation();removePartner('${p.id}')" title="Remove partner">&#10005;</button>
   </div>`;
 }
@@ -202,36 +196,6 @@ async function removePartner(id) {
   await DEL(`/api/partners/${id}`);
   partners = partners.filter(p => p.id !== id);
   renderPartners();
-}
-
-async function discoverPartner(id) {
-  const btn = document.getElementById(`discover-${id}`);
-  const setBtn = (text, disabled) => { if (btn) { btn.disabled = disabled; btn.textContent = text; } };
-  const resetBtn = () => { if (btn) { btn.disabled = false; btn.innerHTML = "&#128269;"; } };
-
-  try {
-    setBtn("Checking…", true);
-    const chk = await GET(`/api/partners/${id}/ping`);
-    if (chk.online) {
-      refreshPartnerStatus();
-      return;
-    }
-
-    if (!confirm("Can't reach this partner at its saved address. Scan the network to find it?")) return;
-
-    setBtn("Scanning…", true);
-    const res = await POST(`/api/partners/${id}/discover`, {});
-    if (res.found) {
-      alert(`Found it — address updated to ${res.ip}:${res.port}`);
-      refreshPartnerStatus();
-    } else {
-      alert("Couldn't find this partner on the network. Make sure it's powered on and connected.");
-    }
-  } catch (e) {
-    alert(`Discover failed: ${e.message}`);
-  } finally {
-    resetBtn();
-  }
 }
 
 // ── SSE ───────────────────────────────────────────────────────────────────────
@@ -510,13 +474,41 @@ function addBrowseSelection() {
 // ── sync (ping + send + receive combined) ────────────────────────────────────
 async function syncPartner(partnerId) {
   // A click is also an ad-hoc ping — fires even with nothing staged to send.
+  // If the saved address doesn't answer, scan for it automatically (no extra click).
   if (config.role === "client") {
-    try { await GET(`/api/partners/${partnerId}/ping`); refreshPartnerStatus(); } catch {}
+    const p = partners.find(x => x.id === partnerId);
+    const label = p ? `${p.name} (${p.ip}:${p.port})` : partnerId;
+    try {
+      console.log(`[sync] pinging ${label}…`);
+      const chk = await GET(`/api/partners/${partnerId}/ping`);
+      if (!chk.online) {
+        console.log(`[sync] ${label} didn't answer — scanning to relocate it`);
+        setDotScanning(partnerId, true);
+        try {
+          const res = await POST(`/api/partners/${partnerId}/discover`, {});
+          console.log(`[sync] scan result for ${label}:`, res);
+        } catch (e) {
+          console.log(`[sync] scan failed for ${label}:`, e.message);
+        } finally {
+          setDotScanning(partnerId, false);
+        }
+      }
+      refreshPartnerStatus();
+    } catch (e) {
+      console.log(`[sync] ping failed for ${label}:`, e.message);
+    }
   }
   if (stagedFiles.length) {
     await sendToPartner(partnerId);
   }
   await receiveFromPartner(partnerId);
+}
+
+function setDotScanning(partnerId, on) {
+  const dot = document.getElementById(`dot-${partnerId}`);
+  if (!dot) return;
+  dot.classList.toggle("scanning", on);
+  if (on) dot.title = "scanning the network for it…";
 }
 
 async function sendToPartner(partnerId) {

@@ -72,6 +72,8 @@
   .status-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
   .status-dot.online  { background: var(--success); box-shadow: 0 0 6px var(--success); }
   .status-dot.offline { background: var(--error); }
+  .status-dot.scanning { background: var(--accent); animation: dot-pulse 0.9s ease-in-out infinite; }
+  @keyframes dot-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
   .partner-info { flex: 1; min-width: 0; }
   .partner-name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 15px; display: flex; align-items: center; gap: 6px; }
   .partner-addr { font-size: 12px; color: var(--muted); margin-top: 2px; }
