@@ -2,7 +2,6 @@ import asyncio
 import json
 import socket
 import subprocess
-import time
 import urllib.parse
 import uuid
 from pathlib import Path
@@ -18,6 +17,26 @@ from sse_starlette.sse import EventSourceResponse
 
 from state import AppState, STAGING_DIR
 
+
+
+async def _hello_check(client: httpx.AsyncClient, ip: str, port: int) -> Optional[dict]:
+    """GETs /api/peer/hello at ip:port, self-identifying with our own name/port
+    (and, if we're a client, our ping frequency so the callee can register us).
+    Returns the parsed reply, or None if unreachable."""
+    params = {"name": state.config["device_name"], "port": state.config["port"]}
+    if state.config.get("role") == "client":
+        params["freq"] = state.config.get("ping_frequency_sec")
+    try:
+        r = await client.get(
+            f"http://{ip}:{port}/api/peer/hello",
+            params=params,
+            headers={"X-Device-ID": state.device_id},
+        )
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    return None
 
 
 def get_local_ip() -> str:
@@ -48,6 +67,11 @@ class _DiscoveryResponder(asyncio.DatagramProtocol):
             return
         if msg.get("type") != "localsend_discover":
             return
+        caller_id = msg.get("from")
+        if caller_id:
+            caller = state.get_partner_by_device_id(caller_id)
+            if caller:
+                _touch(caller)
         reply = json.dumps({
             "type": "localsend_hello",
             "device_id": state.device_id,
@@ -136,10 +160,14 @@ async def get_config():
 class ConfigUpdate(BaseModel):
     device_name: Optional[str] = None
     receive_dir: Optional[str] = None
+    role: Optional[str] = None
+    ping_frequency_sec: Optional[int] = None
 
 
 @app.put("/api/config")
 async def put_config(body: ConfigUpdate):
+    if body.role is not None and body.role not in ("server", "client"):
+        raise HTTPException(400, "role must be 'server' or 'client'")
     updates = {k: v for k, v in body.model_dump().items() if v is not None}
     cfg = state.update_config(updates)
     Path(cfg["receive_dir"]).mkdir(parents=True, exist_ok=True)
@@ -152,11 +180,10 @@ async def put_config(body: ConfigUpdate):
 
 @app.get("/api/partners")
 async def list_partners():
-    return state.partners
+    return [{**p, "status": state.partner_status(p)} for p in state.partners]
 
 
 class AddPartner(BaseModel):
-    name: str
     ip: str
     port: int
 
@@ -166,34 +193,37 @@ async def add_partner(body: AddPartner):
     if state.get_partner_by_ip_port(body.ip, body.port):
         raise HTTPException(409, f"Partner at {body.ip}:{body.port} already exists")
 
-    remote_device_id = None
-    remote_name = body.name.strip()
-    # reachable=True  → we can push files directly to them
-    # reachable=False → they must pull from us; we pull from them via Receive button
-    reachable = False
-
     async with httpx.AsyncClient(timeout=5) as client:
-        try:
-            resp = await client.get(f"http://{body.ip}:{body.port}/api/peer/hello")
-            resp.raise_for_status()
-            remote = resp.json()
-            remote_device_id = remote.get("device_id")
-            if not remote_name:
-                remote_name = remote.get("name", "unknown")
-            reachable = True
-        except Exception:
-            pass  # Save anyway; reachable=False means pull-only for this partner
+        remote = await _hello_check(client, body.ip, body.port)
+
+    if not remote:
+        raise HTTPException(400, "Couldn't reach that address — check the IP, port, and that it's running LocalSend")
+
+    remote_device_id = remote.get("device_id")
+    remote_name = remote.get("name") or "unknown"
 
     if remote_device_id and state.get_partner_by_device_id(remote_device_id):
         raise HTTPException(409, "Partner already added (device already known)")
 
-    partner = state.add_partner(remote_name or "unknown", body.ip, body.port, remote_device_id, reachable)
+    partner = state.add_partner(remote_name, body.ip, body.port, remote_device_id, reachable=True)
+    _touch(partner)
     await state.broadcast("partners_update", state.partners)
-    return partner
+    return {**partner, "status": state.partner_status(partner)}
 
 
 @app.delete("/api/partners/{partner_id}")
 async def remove_partner(partner_id: str):
+    partner = state.get_partner(partner_id)
+    if partner:
+        # Best-effort: tell the other side to drop its record of us too.
+        try:
+            async with httpx.AsyncClient(timeout=2) as client:
+                await client.post(
+                    f"http://{partner['ip']}:{partner['port']}/api/peer/forget",
+                    headers={"X-Device-ID": state.device_id},
+                )
+        except Exception:
+            pass
     state.remove_partner(partner_id)
     await state.broadcast("partners_update", state.partners)
     return {"ok": True}
@@ -218,15 +248,10 @@ async def discover_partner(partner_id: str):
     hit = None
 
     # Fast path: maybe it's still (or again) at its last known address
-    try:
-        async with httpx.AsyncClient(timeout=1.5) as client:
-            resp = await client.get(f"http://{partner['ip']}:{partner['port']}/api/peer/hello")
-            if resp.status_code == 200:
-                remote = resp.json()
-                if matches(remote):
-                    hit = {"ip": partner["ip"], "port": partner["port"], **remote}
-    except Exception:
-        pass
+    async with httpx.AsyncClient(timeout=1.5) as client:
+        remote = await _hello_check(client, partner["ip"], partner["port"])
+    if remote and matches(remote):
+        hit = {"ip": partner["ip"], "port": partner["port"], **remote}
 
     # Fallback: broadcast a discovery query on the partner's known port and listen for replies
     if not hit:
@@ -245,36 +270,53 @@ async def discover_partner(partner_id: str):
         partner["device_id"] = hit["device_id"]
     partner["reachable"] = True
     state._save_partners()
+    _touch(partner)
     await state.broadcast("partners_update", state.partners)
     return {"found": True, "ip": hit["ip"], "port": hit["port"], "changed": changed}
 
 
 @app.get("/api/partners/ping")
 async def ping_partners():
-    now = time.time()
-    results = {}
-    reachable_changed = False
+    """Actively pings every partner. Only meaningful for a client (a server never
+    calls this on its own — it just waits to be pinged)."""
+    changed = False
     async with httpx.AsyncClient(timeout=3) as client:
         async def ping_one(p):
-            nonlocal reachable_changed
-            try:
-                r = await client.get(f"http://{p['ip']}:{p['port']}/api/peer/hello")
-                online = r.status_code == 200
-            except Exception:
-                online = False
-            if online and not p.get("reachable"):
-                p["reachable"] = True
-                reachable_changed = True
-            last_seen = state.partner_last_seen.get(p["id"])
-            results[p["id"]] = {
-                "online": online,
-                "last_seen_sec": round(now - last_seen) if last_seen else None,
-            }
+            nonlocal changed
+            remote = await _hello_check(client, p["ip"], p["port"])
+            online = remote is not None
+            if p.get("reachable") != online:
+                p["reachable"] = online
+                changed = True
+            if online:
+                _touch(p)
         await asyncio.gather(*[ping_one(p) for p in state.partners], return_exceptions=True)
-    if reachable_changed:
+    if changed:
         state._save_partners()
         await state.broadcast("partners_update", state.partners)
-    return results
+    return {p["id"]: {"status": state.partner_status(p)} for p in state.partners}
+
+
+@app.get("/api/partners/{partner_id}/ping")
+async def ping_partner(partner_id: str):
+    """Quick reachability check at the partner's current stored address, used by
+    the Discover flow to decide whether a network scan is actually needed."""
+    partner = state.get_partner(partner_id)
+    if not partner:
+        raise HTTPException(404, "Partner not found")
+
+    async with httpx.AsyncClient(timeout=3) as client:
+        remote = await _hello_check(client, partner["ip"], partner["port"])
+    online = remote is not None
+
+    if partner.get("reachable") != online:
+        partner["reachable"] = online
+        state._save_partners()
+        await state.broadcast("partners_update", state.partners)
+    if online:
+        _touch(partner)
+
+    return {"online": online, "status": state.partner_status(partner)}
 
 
 # ── file staging / upload ─────────────────────────────────────────────────────
@@ -463,14 +505,56 @@ def _require_partner(request: Request) -> dict:
     if not partner:
         raise HTTPException(403, "Unknown device — add this device as a partner first")
 
-    state.partner_last_seen[partner["id"]] = time.time()
-    asyncio.create_task(state.broadcast("partner_active", {"id": partner["id"]}))
+    _touch(partner)
     return partner
 
 
+def _touch(partner: dict, ping_frequency_sec: Optional[int] = None):
+    """Record a successful contact with `partner` and push the resulting status live."""
+    status = state.mark_seen(partner, ping_frequency_sec)
+    asyncio.create_task(state.broadcast("partner_active", {"id": partner["id"], "status": status}))
+
+
 @app.get("/api/peer/hello")
-async def peer_hello():
+async def peer_hello(
+    request: Request,
+    name: Optional[str] = None,
+    port: Optional[int] = None,
+    freq: Optional[int] = None,
+):
+    caller_id = request.headers.get("X-Device-ID")
+    if caller_id:
+        caller = state.get_partner_by_device_id(caller_id)
+
+        # Auto-register: an unknown device pinging us as a heartbeating client
+        # becomes a partner with no manual Add step — client drives its own lifecycle.
+        if not caller and state.config.get("role") == "server" and name and port and freq:
+            client_ip = request.client.host if request.client else None
+            if client_ip:
+                caller = state.add_partner(name, client_ip, port, caller_id, reachable=False)
+                await state.broadcast("partners_update", state.partners)
+
+        if caller:
+            if name and caller.get("name") != name:
+                caller["name"] = name
+            if port and caller.get("port") != port:
+                caller["port"] = port
+            _touch(caller, freq)
+
     return {"device_id": state.device_id, "name": state.config["device_name"]}
+
+
+@app.post("/api/peer/forget")
+async def peer_forget(request: Request):
+    """A partner telling us it's unpairing — remove our record of them too,
+    so a client-initiated delete doesn't leave a stale entry on the server."""
+    caller_id = request.headers.get("X-Device-ID")
+    if caller_id:
+        caller = state.get_partner_by_device_id(caller_id)
+        if caller:
+            state.remove_partner(caller["id"])
+            await state.broadcast("partners_update", state.partners)
+    return {"ok": True}
 
 
 @app.post("/api/peer/push/{filename:path}")
@@ -767,7 +851,6 @@ async def receive_from_partner(partner: dict):
         state.set_receiving(partner["id"], False)
         if announced:
             await state.broadcast("status", {"receiving": False})
-        await state.broadcast("status", {"receiving": False})
 
 
 async def _receive_transfer(partner: dict, transfer: dict, base_url: str, receive_dir: Path):

@@ -3,10 +3,6 @@ let config = {};
 let partners = [];
 let stagedFiles = [];     // {file_id, name, path, size}
 let activeTransfers = {}; // key: `${transfer_id}:${filename}` → DOM element
-let partnerStatus = {};   // partner_id → {online, last_seen_sec}
-let pollIntervalSec = 60;
-let pollTimer = null;
-let pollSecondsLeft = 0;
 let outboxBarMap = {};    // `${outbox_transfer_id}:${filename}` → original bar key
 let toastStore = {};      // toast_id → {saved_path, text_preview, ...}
 let logPaths = {};        // log_entry_id → saved_path
@@ -41,13 +37,38 @@ async function init() {
     const log = await GET("/api/log");
     renderLog(log);
     connectSSE();
-    pingAll();
     setupDropzone();
-    setInterval(pingAll, 30000);
-    startPollTimer();
+    startHeartbeat();
+    // Status can go stale purely from time passing (a client's heartbeat window
+    // lapsing) with no event to push — repaint periodically from persisted state.
+    // This never contacts a partner itself, so it's safe to run regardless of role.
+    setInterval(refreshPartnerStatus, 15000);
   } catch (e) {
     console.error("Init failed", e);
   }
+}
+
+// A "client" pings its partners on its own configured schedule; a "server"
+// never pings out at all — it just waits to be contacted.
+let heartbeatTimer = null;
+function startHeartbeat() {
+  if (heartbeatTimer) clearInterval(heartbeatTimer);
+  if (config.role !== "client") return;
+  pingAllPartners();
+  heartbeatTimer = setInterval(pingAllPartners, Math.max(10, config.ping_frequency_sec || 60) * 1000);
+}
+
+async function pingAllPartners() {
+  if (!partners.length) return;
+  try { await GET("/api/partners/ping"); } catch {}
+  refreshPartnerStatus();
+}
+
+async function refreshPartnerStatus() {
+  try {
+    partners = await GET("/api/partners");
+    renderPartners();
+  } catch {}
 }
 
 // ── config / header ───────────────────────────────────────────────────────────
@@ -64,25 +85,36 @@ function renderConfig() {
       setTimeout(() => { el.textContent = addr; }, 1500);
     });
   };
+  const roleEl = document.getElementById("role-badge");
+  roleEl.textContent = config.role === "client" ? `client · every ${config.ping_frequency_sec}s` : "server";
 }
 
 function openSettings() {
   document.getElementById("cfg-name").value = config.device_name || "";
   document.getElementById("cfg-dir").value  = config.receive_dir || "";
-  document.getElementById("cfg-poll").value = pollIntervalSec;
+  document.getElementById("cfg-role").value = config.role || "server";
+  document.getElementById("cfg-freq").value = config.ping_frequency_sec || 60;
+  onRoleChange();
   openModal("settings-modal");
+}
+
+function onRoleChange() {
+  const isClient = document.getElementById("cfg-role").value === "client";
+  document.getElementById("cfg-freq-row").style.display = isClient ? "" : "none";
 }
 
 async function saveSettings() {
   try {
-    config = await PUT("/api/config", {
+    config = { ...config, ...await PUT("/api/config", {
       device_name: document.getElementById("cfg-name").value.trim(),
       receive_dir:  document.getElementById("cfg-dir").value.trim(),
-    });
-    const newInterval = parseInt(document.getElementById("cfg-poll").value) || 60;
-    setPollInterval(Math.max(10, newInterval));
+      role: document.getElementById("cfg-role").value,
+      ping_frequency_sec: Math.max(10, parseInt(document.getElementById("cfg-freq").value) || 60),
+    }) };
     renderConfig();
+    renderPartners();
     closeModal("settings-modal");
+    startHeartbeat();
   } catch (e) { alert("Save failed: " + e.message); }
 }
 
@@ -97,37 +129,38 @@ function renderPartners() {
 }
 
 function partnerHTML(p) {
-  const status      = partnerStatus[p.id] || {};
-  const online      = status.online;
-  const lastSeenSec = status.last_seen_sec;
-  const [dotCls, dotTip] = resolveStatus(p, online, lastSeenSec);
+  const [dotCls, dotTip] = dotFor(p.status);
 
   const modeLabel = p.reachable ? "server" : "client";
   const modeBadge = p.reachable
     ? `<span class="mode-badge mode-server">${modeLabel}</span>`
     : `<span class="mode-badge mode-client">${modeLabel}</span>`;
 
+  // Discovery only matters for a client relocating a server whose IP changed —
+  // a server's clients self-report their current address on every ping, so it's moot here.
+  const discoverBtn = config.role === "client" ? `
+    <button class="btn btn-sm btn-outline discover-btn" id="discover-${p.id}" onclick="event.stopPropagation();discoverPartner('${p.id}')" title="Find this partner on the network if its address changed">&#128269;</button>` : "";
+
   return `
-  <div class="partner-item" id="partner-${p.id}" onclick="syncPartner('${p.id}')" title="Click to sync: send staged files + check for incoming">
+  <div class="partner-item" id="partner-${p.id}" onclick="syncPartner('${p.id}')" title="Click to sync: ping + send staged files + check for incoming">
     <div class="status-dot ${dotCls}" title="${dotTip}"></div>
     <div class="partner-info">
       <div class="partner-name">${esc(p.name)} ${modeBadge}</div>
       <div class="partner-addr">${esc(p.ip)}:${p.port}</div>
     </div>
-    <button class="btn btn-sm btn-outline discover-btn" id="discover-${p.id}" onclick="event.stopPropagation();discoverPartner('${p.id}')" title="Find this partner on the network if its address changed">&#128269;</button>
+    ${discoverBtn}
     <button class="btn btn-sm btn-danger" onclick="event.stopPropagation();removePartner('${p.id}')" title="Remove partner">&#10005;</button>
   </div>`;
 }
 
-function setPartnerDot(partnerId, cls, tip) {
-  const dot = document.querySelector(`#partner-${partnerId} .status-dot`);
-  if (!dot) return;
-  dot.className = "status-dot " + cls;
-  dot.title = tip;
+// status is computed and persisted server-side — the UI just paints it, no local heuristics.
+function dotFor(status) {
+  if (status === "green") return ["online", "online"];
+  if (status === "red")   return ["offline", "not responding"];
+  return ["", "waiting for contact"];
 }
 
 function openAddPartner() {
-  document.getElementById("ap-name").value   = "";
   document.getElementById("ap-ip").value     = "";
   document.getElementById("ap-port").value   = config.port || "8765";
   document.getElementById("ap-error").textContent  = "";
@@ -137,7 +170,6 @@ function openAddPartner() {
 }
 
 async function submitAddPartner() {
-  const name = document.getElementById("ap-name").value.trim();
   const ip   = document.getElementById("ap-ip").value.trim();
   const port = parseInt(document.getElementById("ap-port").value) || 8765;
   const errEl  = document.getElementById("ap-error");
@@ -152,11 +184,10 @@ async function submitAddPartner() {
   statEl.textContent = "Trying to reach partner…";
 
   try {
-    const p = await POST("/api/partners", { name, ip, port });
+    const p = await POST("/api/partners", { ip, port });
     partners.push(p);
     renderPartners();
     closeModal("add-partner-modal");
-    pingAll();
   } catch (e) {
     errEl.textContent = e.message;
   } finally {
@@ -175,52 +206,32 @@ async function removePartner(id) {
 
 async function discoverPartner(id) {
   const btn = document.getElementById(`discover-${id}`);
-  if (btn) { btn.disabled = true; btn.textContent = "…"; }
+  const setBtn = (text, disabled) => { if (btn) { btn.disabled = disabled; btn.textContent = text; } };
+  const resetBtn = () => { if (btn) { btn.disabled = false; btn.innerHTML = "&#128269;"; } };
+
   try {
+    setBtn("Checking…", true);
+    const chk = await GET(`/api/partners/${id}/ping`);
+    if (chk.online) {
+      refreshPartnerStatus();
+      return;
+    }
+
+    if (!confirm("Can't reach this partner at its saved address. Scan the network to find it?")) return;
+
+    setBtn("Scanning…", true);
     const res = await POST(`/api/partners/${id}/discover`, {});
     if (res.found) {
-      if (res.changed) {
-        alert(`Found it — address updated to ${res.ip}:${res.port}`);
-      }
-      pingAll();
+      alert(`Found it — address updated to ${res.ip}:${res.port}`);
+      refreshPartnerStatus();
     } else {
       alert("Couldn't find this partner on the network. Make sure it's powered on and connected.");
     }
   } catch (e) {
     alert(`Discover failed: ${e.message}`);
   } finally {
-    if (btn) { btn.disabled = false; btn.innerHTML = "&#128269;"; }
+    resetBtn();
   }
-}
-
-// Shared status resolution used by both partnerHTML and pingAll
-function resolveStatus(p, online, lastSeenSec) {
-  if (online) {
-    return ["online", "online"];
-  }
-  if (!p.reachable) {
-    // Client mode: ping failure is expected — use last_seen as signal
-    if (lastSeenSec != null && lastSeenSec < 10)  return ["online", "active"];
-    if (lastSeenSec != null && lastSeenSec < 120)  return ["recent", `active ${lastSeenSec}s ago`];
-    const tip = lastSeenSec != null ? `last seen ${Math.round(lastSeenSec / 60)}m ago` : "waiting for contact";
-    return ["", tip];
-  }
-  // Server mode: ping failure is unexpected
-  if (online === false) return ["offline", "offline"];
-  return ["", "unknown"];  // not yet pinged
-}
-
-async function pingAll() {
-  if (!partners.length) return;
-  try {
-    const res = await GET("/api/partners/ping");
-    partnerStatus = res;
-    partners.forEach(p => {
-      const { online, last_seen_sec } = res[p.id] || {};
-      const [cls, tip] = resolveStatus(p, online, last_seen_sec);
-      setPartnerDot(p.id, cls, tip);
-    });
-  } catch {}
 }
 
 // ── SSE ───────────────────────────────────────────────────────────────────────
@@ -235,11 +246,15 @@ function connectSSE() {
     else if (type === "config_update")   { config = data; renderConfig(); }
 
     else if (type === "partner_active") {
-      // Partner just contacted us — show green immediately without waiting for next pingAll
-      if (!partnerStatus[data.id]) partnerStatus[data.id] = {};
-      partnerStatus[data.id].online = true;
-      partnerStatus[data.id].last_seen_sec = 0;
-      setPartnerDot(data.id, "online", "online");
+      // Live push the instant either side registers contact — no waiting on a timer.
+      const p = partners.find(x => x.id === data.id);
+      if (p) p.status = data.status;
+      const dot = document.querySelector(`#partner-${data.id} .status-dot`);
+      if (dot) {
+        const [cls, tip] = dotFor(data.status);
+        dot.className = "status-dot " + cls;
+        dot.title = tip;
+      }
     }
 
     else if (type === "status") {
@@ -492,8 +507,12 @@ function addBrowseSelection() {
   closeModal("browse-modal");
 }
 
-// ── sync (send + receive combined) ───────────────────────────────────────────
+// ── sync (ping + send + receive combined) ────────────────────────────────────
 async function syncPartner(partnerId) {
+  // A click is also an ad-hoc ping — fires even with nothing staged to send.
+  if (config.role === "client") {
+    try { await GET(`/api/partners/${partnerId}/ping`); refreshPartnerStatus(); } catch {}
+  }
   if (stagedFiles.length) {
     await sendToPartner(partnerId);
   }
@@ -611,38 +630,6 @@ function dismissToast(id) {
   const el = document.getElementById(id);
   if (el) { clearInterval(el._timer); el.remove(); }
   delete toastStore[id];
-}
-
-// ── auto-poll ─────────────────────────────────────────────────────────────────
-function startPollTimer() {
-  if (pollTimer) clearInterval(pollTimer);
-  pollSecondsLeft = pollIntervalSec;
-  updatePollBadge();
-  pollTimer = setInterval(async () => {
-    pollSecondsLeft--;
-    updatePollBadge();
-    if (pollSecondsLeft <= 0) {
-      pollSecondsLeft = pollIntervalSec;
-      await pollAllPartners();
-    }
-  }, 1000);
-}
-
-async function pollAllPartners() {
-  for (const partner of partners) {
-    try { await POST(`/api/receive/${partner.id}`); } catch {}
-  }
-}
-
-function updatePollBadge() {
-  const el = document.getElementById("poll-badge");
-  if (!el) return;
-  el.textContent = `poll in ${pollSecondsLeft}s`;
-}
-
-function setPollInterval(sec) {
-  pollIntervalSec = sec;
-  startPollTimer();
 }
 
 // ── transfer bars ─────────────────────────────────────────────────────────────
@@ -787,7 +774,7 @@ document.querySelectorAll(".modal-backdrop").forEach(el => {
   el.addEventListener("click", e => { if (e.target === el) closeModal(el.id); });
 });
 
-["ap-name", "ap-ip", "ap-port"].forEach(id => {
+["ap-ip", "ap-port"].forEach(id => {
   document.getElementById(id).addEventListener("keydown", e => { if (e.key === "Enter") submitAddPartner(); });
 });
 

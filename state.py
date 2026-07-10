@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -13,6 +14,7 @@ OUTBOX_FILE = DATA_DIR / "outbox.json"
 LOG_FILE = DATA_DIR / "log.json"
 
 LOG_RETENTION_DAYS = 7
+DEFAULT_PING_FREQUENCY_SEC = 60
 
 
 class AppState:
@@ -27,7 +29,6 @@ class AppState:
         self._receiving_partners: set[str] = set()
         self.sse_queues: list[asyncio.Queue] = []
         self.active_tasks: dict[str, asyncio.Task] = {}  # transfer_id → task
-        self.partner_last_seen: dict[str, float] = {}    # partner_id → epoch seconds
 
     # ── config ────────────────────────────────────────────────────────────────
 
@@ -37,6 +38,8 @@ class AppState:
         self.config.setdefault("device_name", f"device-{self.config['device_id'][:6]}")
         self.config.setdefault("port", 8765)
         self.config.setdefault("receive_dir", str(Path.home() / "Downloads" / "localsend-recv"))
+        self.config.setdefault("role", "server")  # "server" = never pings out; "client" = pings its partners
+        self.config.setdefault("ping_frequency_sec", DEFAULT_PING_FREQUENCY_SEC)
         self.device_id: str = self.config["device_id"]
         self._save_config()
 
@@ -68,10 +71,35 @@ class AppState:
             "port": port,
             "device_id": remote_device_id,
             "reachable": reachable,  # True = we can push; False = pull-only
+            "last_ping_at": None,          # epoch seconds, persisted so status survives a restart
+            "ping_frequency_sec": None,    # declared by the partner itself when it pings us as a client
         }
         self.partners.append(p)
         self._save_partners()
         return p
+
+    def mark_seen(self, partner: dict, ping_frequency_sec: int | None = None) -> str:
+        """Record a successful contact from/to `partner` and return its freshly computed status."""
+        partner["last_ping_at"] = time.time()
+        if ping_frequency_sec:
+            partner["ping_frequency_sec"] = ping_frequency_sec
+        self._save_partners()
+        return self.partner_status(partner)
+
+    def partner_status(self, partner: dict) -> str:
+        """green/red/grey, computed from persisted state only — the UI just paints this,
+        it never re-derives freshness from its own timers."""
+        last_ping_at = partner.get("last_ping_at")
+        if not last_ping_at:
+            return "grey"  # never contacted
+        if self.config.get("role") == "client":
+            # We are the one pinging; reachable reflects the outcome of our most recent attempt.
+            return "green" if partner.get("reachable") else "red"
+        # We are the server: partner is a client that must ping *us* — judge freshness by
+        # its own declared frequency (with slack for jitter/one missed beat).
+        freq = partner.get("ping_frequency_sec") or DEFAULT_PING_FREQUENCY_SEC
+        grace = max(freq * 2, freq + 30)
+        return "green" if (time.time() - last_ping_at) <= grace else "red"
 
     def remove_partner(self, partner_id: str):
         self.partners = [p for p in self.partners if p["id"] != partner_id]

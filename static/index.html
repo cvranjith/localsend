@@ -71,7 +71,6 @@
   .partner-item:active { opacity: .85; }
   .status-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
   .status-dot.online  { background: var(--success); box-shadow: 0 0 6px var(--success); }
-  .status-dot.recent  { background: #3a9c50; }
   .status-dot.offline { background: var(--error); }
   .partner-info { flex: 1; min-width: 0; }
   .partner-name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 15px; display: flex; align-items: center; gap: 6px; }
@@ -199,8 +198,8 @@
   <h1>&#128279; LocalSend</h1>
   <span class="badge" id="device-badge">loading...</span>
   <span class="badge" id="addr-badge">&#8212;</span>
+  <span class="badge" id="role-badge">&#8212;</span>
   <div class="header-spacer"></div>
-  <span class="badge" id="poll-badge" style="cursor:pointer;font-size:12px;" onclick="pollAllPartners()" title="Click to poll now">poll in …</span>
   <button class="btn-icon" onclick="openSettings()">&#9881; Settings</button>
 </header>
 
@@ -275,10 +274,6 @@
   <div class="modal">
     <h3>Add Partner</h3>
     <div class="form-row">
-      <label>Display Name</label>
-      <input id="ap-name" placeholder="e.g. MacBook" />
-    </div>
-    <div class="form-row">
       <label>IP Address</label>
       <input id="ap-ip" placeholder="192.168.1.x" />
     </div>
@@ -326,8 +321,15 @@
       <input id="cfg-dir" />
     </div>
     <div class="form-row">
-      <label>Auto-poll interval (seconds)</label>
-      <input id="cfg-poll" type="number" min="10" max="3600" />
+      <label>Role</label>
+      <select id="cfg-role" onchange="onRoleChange()">
+        <option value="server">Server &mdash; always-on, never pings out, waits to be contacted</option>
+        <option value="client">Client &mdash; pings its partners on a schedule</option>
+      </select>
+    </div>
+    <div class="form-row" id="cfg-freq-row">
+      <label>Ping Frequency (seconds)</label>
+      <input id="cfg-freq" type="number" min="10" max="3600" />
     </div>
     <div class="modal-footer">
       <button class="btn btn-outline" onclick="closeModal('settings-modal')">Cancel</button>
