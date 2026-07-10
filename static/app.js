@@ -102,6 +102,7 @@ function openSettings() {
   document.getElementById("cfg-dir").value  = config.receive_dir || "";
   document.getElementById("cfg-role").value = config.role || "server";
   document.getElementById("cfg-freq").value = config.ping_frequency_sec || 60;
+  document.getElementById("cfg-longpoll").value = config.long_poll_timeout_sec || 600;
   onRoleChange();
   openModal("settings-modal");
 }
@@ -109,6 +110,7 @@ function openSettings() {
 function onRoleChange() {
   const isClient = document.getElementById("cfg-role").value === "client";
   document.getElementById("cfg-freq-row").style.display = isClient ? "" : "none";
+  document.getElementById("cfg-longpoll-row").style.display = isClient ? "" : "none";
 }
 
 async function saveSettings() {
@@ -118,6 +120,7 @@ async function saveSettings() {
       receive_dir:  document.getElementById("cfg-dir").value.trim(),
       role: document.getElementById("cfg-role").value,
       ping_frequency_sec: Math.max(10, parseInt(document.getElementById("cfg-freq").value) || 60),
+      long_poll_timeout_sec: Math.max(30, parseInt(document.getElementById("cfg-longpoll").value) || 600),
     }) };
     renderConfig();
     renderPartners();

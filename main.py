@@ -130,6 +130,72 @@ async def _udp_discover(target_port: int, timeout: float = 1.5) -> list[tuple[di
         transport.close()
 
 
+# ── long-poll (client holds a connection open on a server partner for instant
+#    work notification, instead of waiting for its next short heartbeat) ───────
+
+
+async def _longpoll_loop(partner_id: str):
+    """Runs for the lifetime of a client→server pairing. Holds a GET open on the
+    partner; an immediate response means either new work or a dropped connection —
+    either way we just reconnect. No server-side tracking beyond one wake event."""
+    while True:
+        if state.config.get("role") != "client":
+            return  # role changed away from client — stop
+        partner = state.get_partner(partner_id)
+        if not partner:
+            return  # partner removed — stop
+
+        timeout = max(30, min(int(state.config.get("long_poll_timeout_sec") or DEFAULT_LONG_POLL_TIMEOUT_SEC), 3600))
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(connect=10, read=timeout + 15, write=10, pool=10)
+            ) as client:
+                r = await client.get(
+                    f"http://{partner['ip']}:{partner['port']}/api/peer/wait",
+                    params={"timeout": timeout},
+                    headers={"X-Device-ID": state.device_id},
+                )
+            if r.status_code == 200 and r.json().get("work"):
+                _log(f"longpoll: {partner['name']} signaled work — pulling")
+                # Await, don't fire-and-forget: the outbox entry isn't cleared until
+                # this finishes, so reconnecting immediately would just re-poll into
+                # the same still-in-flight transfer over and over.
+                await receive_from_partner(partner)
+            # else: clean timeout, nothing queued — just reconnect immediately
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            _log(f"longpoll: {partner['name']} connection lost ({e}) — retrying in 5s")
+            await asyncio.sleep(5)
+
+
+def _start_longpoll(partner: dict):
+    task = state.longpoll_tasks.get(partner["id"])
+    if task and not task.done():
+        return
+    state.longpoll_tasks[partner["id"]] = asyncio.create_task(_longpoll_loop(partner["id"]))
+
+
+def _stop_longpoll(partner_id: str):
+    task = state.longpoll_tasks.pop(partner_id, None)
+    if task and not task.done():
+        task.cancel()
+
+
+def _sync_longpoll_tasks():
+    """Start/stop long-poll loops so they match the current role and partner list."""
+    if state.config.get("role") != "client":
+        for pid in list(state.longpoll_tasks):
+            _stop_longpoll(pid)
+        return
+    live_ids = {p["id"] for p in state.partners}
+    for pid in list(state.longpoll_tasks):
+        if pid not in live_ids:
+            _stop_longpoll(pid)
+    for p in state.partners:
+        _start_longpoll(p)
+
+
 @app.on_event("startup")
 async def startup():
     Path(state.config["receive_dir"]).mkdir(parents=True, exist_ok=True)
@@ -141,6 +207,7 @@ async def startup():
         )
     except OSError:
         pass  # UDP port unavailable — discovery replies just won't work, HTTP server is unaffected
+    _sync_longpoll_tasks()
 
 
 # ── SSE ───────────────────────────────────────────────────────────────────────
@@ -183,6 +250,7 @@ class ConfigUpdate(BaseModel):
     receive_dir: Optional[str] = None
     role: Optional[str] = None
     ping_frequency_sec: Optional[int] = None
+    long_poll_timeout_sec: Optional[int] = None
 
 
 @app.put("/api/config")
@@ -192,6 +260,7 @@ async def put_config(body: ConfigUpdate):
     updates = {k: v for k, v in body.model_dump().items() if v is not None}
     cfg = state.update_config(updates)
     Path(cfg["receive_dir"]).mkdir(parents=True, exist_ok=True)
+    _sync_longpoll_tasks()
     await state.broadcast("config_update", cfg)
     return cfg
 
@@ -228,6 +297,7 @@ async def add_partner(body: AddPartner):
 
     partner = state.add_partner(remote_name, body.ip, body.port, remote_device_id, reachable=True)
     _touch(partner)
+    _sync_longpoll_tasks()
     await state.broadcast("partners_update", state.partners)
     return {**partner, "status": state.partner_status(partner)}
 
@@ -246,6 +316,7 @@ async def remove_partner(partner_id: str):
         except Exception:
             pass
     state.remove_partner(partner_id)
+    _stop_longpoll(partner_id)
     await state.broadcast("partners_update", state.partners)
     return {"ok": True}
 
@@ -698,6 +769,27 @@ async def peer_receive_push(filename: str, request: Request):
     return {"ok": True, "saved_as": dest.name}
 
 
+@app.get("/api/peer/wait")
+async def peer_wait(request: Request, timeout: int = 600):
+    """Long-poll: a client holds this open on us for instant work notification
+    instead of waiting for its next short heartbeat. We do no extra bookkeeping —
+    _require_partner already marks them seen the moment this request lands, and
+    we just wait on the same per-partner signal add_transfer() already sets."""
+    partner = _require_partner(request)
+    timeout = max(30, min(timeout, 3600))
+
+    if state.get_transfers_for_device(partner["device_id"]):
+        return {"work": True}
+
+    ev = state.get_signal_event(partner["id"])
+    ev.clear()
+    try:
+        await asyncio.wait_for(ev.wait(), timeout=timeout)
+        return {"work": True}
+    except asyncio.TimeoutError:
+        return {"work": False}
+
+
 @app.get("/api/peer/check")
 async def peer_check(request: Request):
     partner = _require_partner(request)
@@ -1052,4 +1144,6 @@ if __name__ == "__main__":
 
     port = args.port or int(state.config.get("port", 8765))
     state.update_config({"port": port})  # persist so the UI shows the right port
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+    # Without this, a held /api/peer/wait long-poll (up to long_poll_timeout_sec,
+    # default 10min) blocks graceful shutdown indefinitely — Ctrl+C would just hang.
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False, timeout_graceful_shutdown=5)

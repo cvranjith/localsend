@@ -333,6 +333,10 @@
       <label>Ping Frequency (seconds)</label>
       <input id="cfg-freq" type="number" min="10" max="3600" />
     </div>
+    <div class="form-row" id="cfg-longpoll-row">
+      <label>Long-poll Timeout (seconds)</label>
+      <input id="cfg-longpoll" type="number" min="30" max="3600" />
+    </div>
     <div class="modal-footer">
       <button class="btn btn-outline" onclick="closeModal('settings-modal')">Cancel</button>
       <button class="btn btn-primary" onclick="saveSettings()">Save</button>

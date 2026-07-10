@@ -15,6 +15,7 @@ LOG_FILE = DATA_DIR / "log.json"
 
 LOG_RETENTION_DAYS = 7
 DEFAULT_PING_FREQUENCY_SEC = 60
+DEFAULT_LONG_POLL_TIMEOUT_SEC = 600
 
 
 class AppState:
@@ -28,7 +29,9 @@ class AppState:
         self.file_semaphore = asyncio.Semaphore(6)
         self._receiving_partners: set[str] = set()
         self.sse_queues: list[asyncio.Queue] = []
-        self.active_tasks: dict[str, asyncio.Task] = {}  # transfer_id → task
+        self.active_tasks: dict[str, asyncio.Task] = {}      # transfer_id → task
+        self.longpoll_tasks: dict[str, asyncio.Task] = {}    # partner_id → our long-poll loop against them
+        self._partner_signals: dict[str, asyncio.Event] = {}  # partner_id → "new work queued" wake-up
 
     # ── config ────────────────────────────────────────────────────────────────
 
@@ -40,6 +43,7 @@ class AppState:
         self.config.setdefault("receive_dir", str(Path.home() / "Downloads" / "localsend-recv"))
         self.config.setdefault("role", "server")  # "server" = never pings out; "client" = pings its partners
         self.config.setdefault("ping_frequency_sec", DEFAULT_PING_FREQUENCY_SEC)
+        self.config.setdefault("long_poll_timeout_sec", DEFAULT_LONG_POLL_TIMEOUT_SEC)
         self.device_id: str = self.config["device_id"]
         self._save_config()
 
@@ -136,7 +140,19 @@ class AppState:
         }
         self.outbox.append(t)
         self._save_outbox()
+        self.signal_partner(partner_id)  # wake any long-poll holding open for them
         return t
+
+    # ── long-poll wake signal ────────────────────────────────────────────────
+
+    def get_signal_event(self, partner_id: str) -> asyncio.Event:
+        ev = self._partner_signals.get(partner_id)
+        if ev is None:
+            ev = self._partner_signals[partner_id] = asyncio.Event()
+        return ev
+
+    def signal_partner(self, partner_id: str):
+        self.get_signal_event(partner_id).set()
 
     def get_transfer(self, transfer_id: str) -> dict | None:
         return next((t for t in self.outbox if t["transfer_id"] == transfer_id), None)
