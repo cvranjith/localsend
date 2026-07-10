@@ -39,10 +39,7 @@ async function init() {
     connectSSE();
     setupDropzone();
     startHeartbeat();
-    // Status can go stale purely from time passing (a client's heartbeat window
-    // lapsing) with no event to push — repaint periodically from persisted state.
-    // This never contacts a partner itself, so it's safe to run regardless of role.
-    setInterval(refreshPartnerStatus, 15000);
+    startStatusRepaint();
   } catch (e) {
     console.error("Init failed", e);
   }
@@ -56,6 +53,17 @@ function startHeartbeat() {
   if (config.role !== "client") return;
   pingAllPartners();
   heartbeatTimer = setInterval(pingAllPartners, Math.max(10, config.ping_frequency_sec || 60) * 1000);
+}
+
+// A server's clients can go stale purely from time passing (a heartbeat window
+// lapsing) with no event to push, so it needs to repaint on a timer to catch
+// that. A client doesn't: its own heartbeat cadence and live SSE pushes already
+// keep it fresh, so skip this there rather than polling redundantly.
+let statusRepaintTimer = null;
+function startStatusRepaint() {
+  if (statusRepaintTimer) clearInterval(statusRepaintTimer);
+  if (config.role !== "server") return;
+  statusRepaintTimer = setInterval(refreshPartnerStatus, 30000);
 }
 
 async function pingAllPartners() {
@@ -115,6 +123,7 @@ async function saveSettings() {
     renderPartners();
     closeModal("settings-modal");
     startHeartbeat();
+    startStatusRepaint();
   } catch (e) { alert("Save failed: " + e.message); }
 }
 

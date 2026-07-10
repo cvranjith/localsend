@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import socket
 import subprocess
 import urllib.parse
@@ -17,6 +18,18 @@ from sse_starlette.sse import EventSourceResponse
 
 from state import AppState, STAGING_DIR
 
+
+# Routine status polling (repainting the partner list, the client heartbeat) would
+# otherwise spam the terminal on every tick and drown out the discover/scan logs
+# that actually matter — drop just those two paths from uvicorn's access log.
+class _QuietAccessFilter(logging.Filter):
+    _quiet = ('"GET /api/partners HTTP/', '"GET /api/partners/ping HTTP/')
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not any(q in record.getMessage() for q in self._quiet)
+
+
+logging.getLogger("uvicorn.access").addFilter(_QuietAccessFilter())
 
 
 def _log(msg: str):
