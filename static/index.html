@@ -178,6 +178,8 @@
 
   /* ── browse modal ── */
   .browse-toolbar { display: flex; gap: 6px; margin-bottom: 12px; }
+  .browse-path-wrap { position: relative; flex: 1; min-width: 0; }
+  .browse-path-wrap input { width: 100%; }
   .browse-toolbar input { font-family: monospace; font-size: 13px; }
   .browse-list { max-height: 340px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--card); }
   .browse-item { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-bottom: 1px solid var(--border); font-size: 14px; }
@@ -188,6 +190,14 @@
   .browse-icon { flex-shrink: 0; }
   .browse-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .browse-size { color: var(--muted); font-size: 12px; flex-shrink: 0; }
+  .browse-suggest {
+    display: none; position: absolute; top: 100%; left: 0; right: 0; margin-top: 4px; z-index: 30;
+    max-height: 220px; overflow-y: auto; background: var(--card); border: 1px solid var(--border);
+    border-radius: 8px; box-shadow: 0 4px 14px rgba(0,0,0,.18);
+  }
+  .browse-suggest.show { display: block; }
+  .browse-suggest-item { display: flex; align-items: center; gap: 8px; padding: 6px 10px; font-size: 13px; cursor: pointer; }
+  .browse-suggest-item:hover, .browse-suggest-item.active { background: rgba(77,155,255,.12); }
 
   @media (max-width: 700px) {
     .top-grid { grid-template-columns: 1fr; }
@@ -298,8 +308,11 @@
     <h3>&#128193; Browse Server Files</h3>
     <div class="browse-toolbar">
       <button class="btn btn-sm btn-outline" id="browse-up-btn" onclick="browseUp()" title="Up one level">&#8593;</button>
-      <input id="browse-path-input" onkeydown="if(event.key==='Enter') browseTo(this.value)">
-      <button class="btn btn-sm btn-outline" onclick="browseTo(document.getElementById('browse-path-input').value)">Go</button>
+      <div class="browse-path-wrap">
+        <input id="browse-path-input" autocomplete="off" oninput="onBrowsePathInput(this.value)" onkeydown="onBrowsePathKeydown(event)">
+        <div id="browse-suggest" class="browse-suggest"></div>
+      </div>
+      <button class="btn btn-sm btn-outline" onclick="onBrowseGoClick()">Go</button>
     </div>
     <div id="browse-list" class="browse-list"></div>
     <div class="modal-footer">

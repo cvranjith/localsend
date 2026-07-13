@@ -406,9 +406,14 @@ document.addEventListener("paste", (e) => {
 const BROWSE_LAST_PATH_KEY = "localsend_browse_path";
 let browseState = { path: null, parent: null, entries: [] };
 let browseSelected = new Map(); // path → {name, path, size}
+let browseSuggestEntries = [];
+let browseSuggestIndex = -1;
+let browseSuggestTimer = null;
+let browseSuggestBase = null;
 
 async function openBrowseModal() {
   browseSelected = new Map();
+  hideBrowseSuggestions();
   await browseTo(localStorage.getItem(BROWSE_LAST_PATH_KEY) || "");
   openModal("browse-modal");
 }
@@ -416,6 +421,13 @@ async function openBrowseModal() {
 async function browseTo(path) {
   try {
     const res = await GET(`/api/browse?path=${encodeURIComponent(path || "")}`);
+    if (res.is_file) {
+      // A full file path was typed/pasted: select it instead of trying to
+      // navigate "into" it, then show the containing folder as usual.
+      browseSelected.set(res.path, { name: res.name, path: res.path, size: res.size });
+      await browseTo(res.parent);
+      return;
+    }
     browseState = res;
     localStorage.setItem(BROWSE_LAST_PATH_KEY, res.path);
     renderBrowse();
@@ -428,9 +440,86 @@ function browseUp() {
   if (browseState.parent) browseTo(browseState.parent);
 }
 
+function onBrowsePathInput(value) {
+  clearTimeout(browseSuggestTimer);
+  browseSuggestTimer = setTimeout(() => fetchBrowseSuggestions(value), 150);
+}
+
+async function fetchBrowseSuggestions(value) {
+  try {
+    const res = await GET(`/api/browse/suggest?path=${encodeURIComponent(value || "")}`);
+    browseSuggestEntries = res.entries;
+    browseSuggestBase = res.base;
+    browseSuggestIndex = -1;
+    renderBrowseSuggestions();
+  } catch (e) {
+    hideBrowseSuggestions();
+  }
+}
+
+function renderBrowseSuggestions() {
+  const box = document.getElementById("browse-suggest");
+  if (!browseSuggestEntries.length) {
+    box.classList.remove("show");
+    box.innerHTML = "";
+    return;
+  }
+  box.classList.add("show");
+  box.innerHTML = browseSuggestEntries.map((e, i) => `
+    <div class="browse-suggest-item ${i === browseSuggestIndex ? "active" : ""}" onmousedown="event.preventDefault(); pickBrowseSuggestion(${i})">
+      <span class="browse-icon">${e.is_dir ? "&#128193;" : "&#128196;"}</span>
+      <span class="browse-name" title="${esc(e.name)}">${esc(e.name)}</span>
+      ${e.is_dir ? "" : `<span class="browse-size">${fmtSize(e.size)}</span>`}
+    </div>`).join("");
+}
+
+function pickBrowseSuggestion(i) {
+  const e = browseSuggestEntries[i];
+  if (!e) return;
+  const base = browseSuggestBase;
+  hideBrowseSuggestions();
+  if (e.is_dir) {
+    browseTo(e.path);
+  } else {
+    browseSelected.set(e.path, { name: e.name, path: e.path, size: e.size });
+    browseTo(base); // jump to the file's folder so the selection is visible
+  }
+}
+
+function hideBrowseSuggestions() {
+  browseSuggestEntries = [];
+  browseSuggestIndex = -1;
+  const box = document.getElementById("browse-suggest");
+  if (box) { box.classList.remove("show"); box.innerHTML = ""; }
+}
+
+function onBrowsePathKeydown(event) {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    if (browseSuggestIndex >= 0) pickBrowseSuggestion(browseSuggestIndex);
+    else { hideBrowseSuggestions(); browseTo(event.target.value); }
+  } else if (event.key === "ArrowDown" && browseSuggestEntries.length) {
+    event.preventDefault();
+    browseSuggestIndex = Math.min(browseSuggestIndex + 1, browseSuggestEntries.length - 1);
+    renderBrowseSuggestions();
+  } else if (event.key === "ArrowUp" && browseSuggestEntries.length) {
+    event.preventDefault();
+    browseSuggestIndex = Math.max(browseSuggestIndex - 1, 0);
+    renderBrowseSuggestions();
+  } else if (event.key === "Escape") {
+    hideBrowseSuggestions();
+  }
+}
+
+function onBrowseGoClick() {
+  hideBrowseSuggestions();
+  browseTo(document.getElementById("browse-path-input").value);
+}
+
 function renderBrowse() {
   document.getElementById("browse-path-input").value = browseState.path;
   document.getElementById("browse-up-btn").disabled = !browseState.parent;
+  hideBrowseSuggestions();
 
   const list = document.getElementById("browse-list");
   if (!browseState.entries.length) {

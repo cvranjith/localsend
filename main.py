@@ -496,14 +496,26 @@ async def upload_files(files: list[UploadFile] = File(...)):
 async def browse_dir(path: str = ""):
     """List a directory on the server's own filesystem, so a file can be
     queued for sending by path without first uploading its bytes through
-    the browser."""
+    the browser. If the path resolves to a file instead, report it as such
+    (with its parent dir) so the caller can select it directly rather than
+    navigate into it."""
     p = Path(path).expanduser() if path else Path.home()
     try:
         p = p.resolve()
     except (OSError, RuntimeError):
         raise HTTPException(400, "Invalid path")
-    if not p.exists() or not p.is_dir():
-        raise HTTPException(404, "Not a directory")
+    if not p.exists():
+        raise HTTPException(404, "No such file or directory")
+
+    if p.is_file():
+        try:
+            size = p.stat().st_size
+        except OSError:
+            raise HTTPException(403, "Permission denied")
+        return {"path": str(p), "parent": str(p.parent), "is_file": True, "name": p.name, "size": size}
+
+    if not p.is_dir():
+        raise HTTPException(404, "Not a file or directory")
 
     entries = []
     try:
@@ -523,7 +535,50 @@ async def browse_dir(path: str = ""):
 
     entries.sort(key=lambda e: (not e["is_dir"], e["name"].lower()))
     parent = str(p.parent) if p.parent != p else None
-    return {"path": str(p), "parent": parent, "entries": entries}
+    return {"path": str(p), "parent": parent, "is_file": False, "entries": entries}
+
+
+@app.get("/api/browse/suggest")
+async def browse_suggest(path: str = ""):
+    """Autocomplete helper for the browse path field: given a partial path
+    being typed, return sibling entries in its directory whose name starts
+    with the typed fragment (or, if the fragment already ends in a
+    separator, the full contents of that directory)."""
+    raw = path or ""
+    expanded = Path(raw).expanduser()
+    if raw.endswith("/") or raw.endswith("\\"):
+        base, prefix = expanded, ""
+    else:
+        base, prefix = expanded.parent, expanded.name
+
+    try:
+        base = base.resolve()
+    except (OSError, RuntimeError):
+        return {"entries": []}
+    if not base.is_dir():
+        return {"entries": []}
+
+    prefix_lower = prefix.lower()
+    matches = []
+    try:
+        for child in base.iterdir():
+            if prefix_lower and not child.name.lower().startswith(prefix_lower):
+                continue
+            try:
+                is_dir = child.is_dir()
+                matches.append({
+                    "name": child.name,
+                    "path": str(child),
+                    "is_dir": is_dir,
+                    "size": None if is_dir else child.stat().st_size,
+                })
+            except OSError:
+                continue
+    except PermissionError:
+        return {"entries": []}
+
+    matches.sort(key=lambda e: (not e["is_dir"], e["name"].lower()))
+    return {"entries": matches[:20], "base": str(base)}
 
 
 # ── outbox (for pull-side: partner queues here, we pull on Receive) ───────────
