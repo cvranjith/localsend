@@ -54,6 +54,8 @@
   /* ── form ── */
   .form-row { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
   .form-row label { font-size: 13px; color: var(--muted); }
+  .checkbox-row { flex-direction: row !important; align-items: flex-start; gap: 8px !important; cursor: pointer; }
+  .checkbox-row input { width: auto; margin-top: 2px; }
   .form-inline { display: flex; gap: 6px; }
   .form-inline input { flex: 1; }
   input, select { background: var(--card); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 8px 12px; font-size: 14px; width: 100%; }
@@ -354,6 +356,12 @@
     <div class="form-row" id="cfg-longpoll-row">
       <label>Long-poll Timeout (seconds)</label>
       <input id="cfg-longpoll" type="number" min="30" max="3600" />
+    </div>
+    <div class="form-row">
+      <label class="checkbox-row">
+        <input type="checkbox" id="cfg-auto-cloud" />
+        Auto cloud fallback &mdash; route a sync through the cloud when a partner isn't green, switch back to direct once it is
+      </label>
     </div>
     <div class="modal-footer">
       <button class="btn btn-outline" onclick="closeModal('settings-modal')">Cancel</button>

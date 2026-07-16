@@ -44,6 +44,7 @@ class AppState:
         self.config.setdefault("role", "server")  # "server" = never pings out; "client" = pings its partners
         self.config.setdefault("ping_frequency_sec", DEFAULT_PING_FREQUENCY_SEC)
         self.config.setdefault("long_poll_timeout_sec", DEFAULT_LONG_POLL_TIMEOUT_SEC)
+        self.config.setdefault("auto_cloud_fallback", False)  # opt-in: route sync through the cloud once a partner is non-green, back to direct once it's green again
         self.device_id: str = self.config["device_id"]
         self._save_config()
 
@@ -72,6 +73,9 @@ class AppState:
             if "mode" not in p:
                 p["mode"] = "client" if p.get("ping_frequency_sec") else "server"
                 changed = True
+            if "force_cloud" not in p:
+                p["force_cloud"] = False
+                changed = True
         if changed:
             self._save_partners()
 
@@ -92,10 +96,19 @@ class AppState:
             "mode": mode,  # "server" (we dialed into them) or "client" (they dialed into us) — fixed at creation, not touched by later reachability checks
             "last_ping_at": None,          # epoch seconds, persisted so status survives a restart
             "ping_frequency_sec": None,    # declared by the partner itself when it pings us as a client
+            "force_cloud": False,          # manual override: always use the cloud route for this partner, even while direct is up
         }
         self.partners.append(p)
         self._save_partners()
         return p
+
+    def set_force_cloud(self, partner_id: str, value: bool) -> dict | None:
+        partner = self.get_partner(partner_id)
+        if not partner:
+            return None
+        partner["force_cloud"] = value
+        self._save_partners()
+        return partner
 
     def mark_seen(self, partner: dict, ping_frequency_sec: int | None = None) -> str:
         """Record a successful contact from/to `partner` and return its freshly computed status."""

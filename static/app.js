@@ -103,6 +103,7 @@ function openSettings() {
   document.getElementById("cfg-role").value = config.role || "server";
   document.getElementById("cfg-freq").value = config.ping_frequency_sec || 60;
   document.getElementById("cfg-longpoll").value = config.long_poll_timeout_sec || 600;
+  document.getElementById("cfg-auto-cloud").checked = !!config.auto_cloud_fallback;
   onRoleChange();
   openModal("settings-modal");
 }
@@ -121,6 +122,7 @@ async function saveSettings() {
       role: document.getElementById("cfg-role").value,
       ping_frequency_sec: Math.max(10, parseInt(document.getElementById("cfg-freq").value) || 60),
       long_poll_timeout_sec: Math.max(30, parseInt(document.getElementById("cfg-longpoll").value) || 600),
+      auto_cloud_fallback: document.getElementById("cfg-auto-cloud").checked,
     }) };
     renderConfig();
     renderPartners();
@@ -150,11 +152,20 @@ function partnerHTML(p) {
     ? `<span class="mode-badge mode-client">client</span>`
     : `<span class="mode-badge mode-server">server</span>`;
 
-  // Direct pipe looks down — offer the cloud fallback instead. Hidden the rest
-  // of the time to keep the normal (direct) path visually uncluttered.
-  const cloudBtn = p.status !== "green"
+  // One-off manual cloud sync — only shown when direct looks down, for a quick
+  // "just this once" push without changing any lasting setting.
+  const cloudBtn = !p.force_cloud && p.status !== "green"
     ? `<button class="btn btn-sm btn-outline" onclick="event.stopPropagation();cloudSyncPartner('${p.id}')" title="Direct connection looks down — send staged files via cloud object storage instead, and check for anything they've left you there">&#9729; Cloud</button>`
     : "";
+
+  // Durable per-partner override — always take the cloud route for this
+  // partner regardless of live status, until toggled off again.
+  const forceCloudBtn = `
+    <button class="btn btn-sm ${p.force_cloud ? "btn-primary" : "btn-outline"}"
+      onclick="event.stopPropagation();toggleForceCloud('${p.id}', ${p.force_cloud ? "false" : "true"})"
+      title="${p.force_cloud ? "Always using the cloud route for this partner — click to go back to direct" : "Force this partner to always use the cloud route, even while direct is up"}">
+      &#9729; ${p.force_cloud ? "Forced" : "Force"}
+    </button>`;
 
   return `
   <div class="partner-item" id="partner-${p.id}" onclick="syncPartner('${p.id}')" title="Click to sync: ping (scanning to relocate it if unreachable) + send staged files + check for incoming">
@@ -165,6 +176,7 @@ function partnerHTML(p) {
     </div>
     <div class="partner-actions">
       ${cloudBtn}
+      ${forceCloudBtn}
       <button class="btn btn-sm btn-danger" onclick="event.stopPropagation();removePartner('${p.id}')" title="Remove partner">&#10005;</button>
     </div>
   </div>`;
@@ -219,6 +231,17 @@ async function removePartner(id) {
   await DEL(`/api/partners/${id}`);
   partners = partners.filter(p => p.id !== id);
   renderPartners();
+}
+
+async function toggleForceCloud(id, value) {
+  try {
+    const updated = await PUT(`/api/partners/${id}/force-cloud`, { force_cloud: value });
+    const p = partners.find(x => x.id === id);
+    if (p) Object.assign(p, updated);
+    renderPartners();
+  } catch (e) {
+    alert(`Couldn't update: ${e.message}`);
+  }
 }
 
 // ── SSE ───────────────────────────────────────────────────────────────────────
@@ -585,11 +608,18 @@ function addBrowseSelection() {
 
 // ── sync (ping + send + receive combined) ────────────────────────────────────
 async function syncPartner(partnerId) {
+  const initial = partners.find(x => x.id === partnerId);
+
+  // Manual override — always take the cloud route for this partner, skip
+  // probing direct connectivity at all.
+  if (initial && initial.force_cloud) {
+    return cloudSyncPartner(partnerId);
+  }
+
   // A click is also an ad-hoc ping — fires even with nothing staged to send.
   // If the saved address doesn't answer, scan for it automatically (no extra click).
   if (config.role === "client") {
-    const p = partners.find(x => x.id === partnerId);
-    const label = p ? `${p.name} (${p.ip}:${p.port})` : partnerId;
+    const label = initial ? `${initial.name} (${initial.ip}:${initial.port})` : partnerId;
     try {
       console.log(`[sync] pinging ${label}…`);
       const chk = await GET(`/api/partners/${partnerId}/ping`);
@@ -610,6 +640,16 @@ async function syncPartner(partnerId) {
       console.log(`[sync] ping failed for ${label}:`, e.message);
     }
   }
+
+  // Opt-in auto-fallback: once the connectivity check above shows this partner
+  // isn't green, route through the cloud instead — automatically switches back
+  // to direct on its own next time, since this re-checks live status every call.
+  const current = partners.find(x => x.id === partnerId);
+  if (config.auto_cloud_fallback && current && current.status !== "green") {
+    console.log(`[sync] auto cloud fallback for ${current.name} (status: ${current.status})`);
+    return cloudSyncPartner(partnerId);
+  }
+
   if (stagedFiles.length) {
     await sendToPartner(partnerId);
   }

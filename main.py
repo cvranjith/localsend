@@ -252,6 +252,7 @@ class ConfigUpdate(BaseModel):
     role: Optional[str] = None
     ping_frequency_sec: Optional[int] = None
     long_poll_timeout_sec: Optional[int] = None
+    auto_cloud_fallback: Optional[bool] = None
 
 
 @app.put("/api/config")
@@ -299,6 +300,19 @@ async def add_partner(body: AddPartner):
     partner = state.add_partner(remote_name, body.ip, body.port, remote_device_id, reachable=True, mode="server")
     _touch(partner)
     _sync_longpoll_tasks()
+    await state.broadcast("partners_update", state.partners)
+    return {**partner, "status": state.partner_status(partner)}
+
+
+class ForceCloudUpdate(BaseModel):
+    force_cloud: bool
+
+
+@app.put("/api/partners/{partner_id}/force-cloud")
+async def set_partner_force_cloud(partner_id: str, body: ForceCloudUpdate):
+    partner = state.set_force_cloud(partner_id, body.force_cloud)
+    if not partner:
+        raise HTTPException(404, "Partner not found")
     await state.broadcast("partners_update", state.partners)
     return {**partner, "status": state.partner_status(partner)}
 
@@ -1242,6 +1256,18 @@ async def _download_file(
 
 
 # ── static ────────────────────────────────────────────────────────────────────
+# Frequently-edited files served from disk (index.html/app.js) — a plain browser
+# reload must always fetch the current version, not a stale cached one from
+# before the last update (a plain F5 silently kept serving old JS more than
+# once during development here, masking already-fixed backend behavior).
+
+
+@app.middleware("http")
+async def _no_cache_static(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.get("/")
