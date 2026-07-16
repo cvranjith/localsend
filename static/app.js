@@ -102,7 +102,7 @@ function openSettings() {
   document.getElementById("cfg-dir").value  = config.receive_dir || "";
   document.getElementById("cfg-role").value = config.role || "server";
   document.getElementById("cfg-freq").value = config.ping_frequency_sec || 60;
-  document.getElementById("cfg-longpoll").value = config.long_poll_timeout_sec || 600;
+  document.getElementById("cfg-longpoll").value = config.long_poll_timeout_sec || 20;
   onRoleChange();
   openModal("settings-modal");
 }
@@ -120,7 +120,7 @@ async function saveSettings() {
       receive_dir:  document.getElementById("cfg-dir").value.trim(),
       role: document.getElementById("cfg-role").value,
       ping_frequency_sec: Math.max(10, parseInt(document.getElementById("cfg-freq").value) || 60),
-      long_poll_timeout_sec: Math.max(30, parseInt(document.getElementById("cfg-longpoll").value) || 600),
+      long_poll_timeout_sec: Math.max(10, parseInt(document.getElementById("cfg-longpoll").value) || 20),
     }) };
     renderConfig();
     renderPartners();
@@ -141,7 +141,7 @@ function renderPartners() {
 }
 
 function partnerHTML(p) {
-  const [dotCls, dotTip] = dotFor(p.status);
+  const dot = dotFor(p);
   const route = p.route || "local";
 
   // Fixed at the time the partner was added — never flips with a transient
@@ -151,44 +151,43 @@ function partnerHTML(p) {
     ? `<span class="mode-badge mode-client">client</span>`
     : `<span class="mode-badge mode-server">server</span>`;
 
-  // Only one route is ever active — shown as a badge next to the name when
-  // it's not the default "local", so clicking the row already does the right
-  // thing (direct, auto-fallback, or straight to cloud) with no extra button.
-  const routeBadge = route === "cloud"
-    ? `<span class="mode-badge route-cloud" title="Always uses the cloud route">&#9729; cloud</span>`
-    : route === "auto"
-    ? `<span class="mode-badge route-auto" title="Direct when reachable, falls back to cloud automatically">auto</span>`
-    : "";
-
-  // Subnet scanning is opt-in (wildcard IP, e.g. 192.168.1.*) — flagged here
-  // so it's clear this partner's address is allowed to roam within the LAN.
-  const scanBadge = p.allow_scan
-    ? `<span class="mode-badge route-auto" title="Scanning enabled — will probe the LAN to relocate this partner if its IP changes">scan</span>`
-    : "";
-
-  const scanNote = p.allow_scan ? " (scanning to relocate it if unreachable)" : "";
   const syncTip = route === "cloud"
     ? "Click to sync via the cloud route"
     : route === "auto"
-    ? `Click to sync: ping + send/receive direct, automatically falling back to cloud if it's down${scanNote}`
-    : `Click to sync: ping${scanNote} + send staged files + check for incoming`;
+    ? "Click to sync: ping direct, falling back to cloud automatically if it's down"
+    : "Click to sync: ping + send staged files + check for incoming";
 
   return `
   <div class="partner-item" id="partner-${p.id}" onclick="syncPartner('${p.id}')" title="${syncTip}">
-    <div class="status-dot ${dotCls}" id="dot-${p.id}" title="${dotTip}"></div>
+    <div class="status-dot ${dot.cls}" id="dot-${p.id}" title="${dot.tip}">${dot.glyph}</div>
     <div class="partner-info">
-      <div class="partner-name">${esc(p.name)} ${modeBadge} ${routeBadge} ${scanBadge}</div>
+      <div class="partner-name">${esc(p.name)} ${modeBadge}</div>
       <div class="partner-addr">${esc(p.ip)}:${p.port}</div>
     </div>
     <button class="btn-menu" onclick="event.stopPropagation();openPartnerEdit('${p.id}')" title="Edit partner">&#8942;</button>
   </div>`;
 }
 
-// status is computed and persisted server-side — the UI just paints it, no local heuristics.
-function dotFor(status) {
-  if (status === "green") return ["online", "online"];
-  if (status === "red")   return ["offline", "not responding"];
-  return ["", "waiting for contact"];
+// The dot alone communicates connection state — no separate route/scan text
+// badges. Green = direct is up. A cloud glyph = route is "cloud" (always),
+// or route is "auto" and direct isn't reachable right now (about to fall
+// back). Red = direct is down and there's no cloud fallback opted in (route
+// "local"). Grey = never contacted yet.
+function dotFor(p) {
+  const route = p.route || "local";
+  if (route === "cloud") {
+    return { cls: "cloud", tip: "cloud mode — click syncs via the cloud route", glyph: "☁" };
+  }
+  if (p.status === "green") {
+    return { cls: "online", tip: "online", glyph: "" };
+  }
+  if (p.status === "red" && route === "auto") {
+    return { cls: "cloud", tip: "direct isn't reachable — will use the cloud fallback", glyph: "☁" };
+  }
+  if (p.status === "red") {
+    return { cls: "offline", tip: "not responding", glyph: "" };
+  }
+  return { cls: "", tip: "waiting for contact", glyph: "" };
 }
 
 function openAddPartner() {
@@ -293,11 +292,12 @@ function connectSSE() {
       // Live push the instant either side registers contact — no waiting on a timer.
       const p = partners.find(x => x.id === data.id);
       if (p) p.status = data.status;
-      const dot = document.querySelector(`#partner-${data.id} .status-dot`);
-      if (dot) {
-        const [cls, tip] = dotFor(data.status);
-        dot.className = "status-dot " + cls;
-        dot.title = tip;
+      const dotEl = document.querySelector(`#partner-${data.id} .status-dot`);
+      if (dotEl && p) {
+        const d = dotFor(p);
+        dotEl.className = "status-dot " + d.cls;
+        dotEl.title = d.tip;
+        dotEl.textContent = d.glyph;
       }
     }
 

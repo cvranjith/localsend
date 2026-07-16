@@ -18,7 +18,7 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from cloud import send_via_cloud, receive_via_cloud
-from state import AppState, STAGING_DIR
+from state import AppState, STAGING_DIR, LONGPOLL_GRACE_SEC, DEFAULT_LONG_POLL_TIMEOUT_SEC
 
 
 # Routine status polling (repainting the partner list, the client heartbeat) would
@@ -147,7 +147,7 @@ async def _longpoll_loop(partner_id: str):
         if not partner:
             return  # partner removed — stop
 
-        timeout = max(30, min(int(state.config.get("long_poll_timeout_sec") or DEFAULT_LONG_POLL_TIMEOUT_SEC), 3600))
+        timeout = max(10, min(int(state.config.get("long_poll_timeout_sec") or DEFAULT_LONG_POLL_TIMEOUT_SEC), 3600))
         try:
             async with httpx.AsyncClient(
                 timeout=httpx.Timeout(connect=10, read=timeout + 15, write=10, pool=10)
@@ -950,45 +950,60 @@ async def peer_receive_push(filename: str, request: Request):
     return {"ok": True, "saved_as": dest.name}
 
 
+async def _recheck_partner_soon(partner_id: str):
+    """A long-poll hold just ended. A healthy client reconnects almost
+    instantly, so give it LONGPOLL_GRACE_SEC to do that before checking again
+    — if it hasn't, partner_status() will now read as down, and we push that
+    out instead of waiting for the next explicit poll or manual refresh."""
+    await asyncio.sleep(LONGPOLL_GRACE_SEC + 1)
+    partner = state.get_partner(partner_id)
+    if not partner:
+        return
+    status = state.partner_status(partner)
+    await state.broadcast("partner_active", {"id": partner_id, "status": status})
+
+
 @app.get("/api/peer/wait")
 async def peer_wait(request: Request, timeout: int = 600):
     """Long-poll: a client holds this open on us for instant work notification
-    instead of waiting for its next short heartbeat. _require_partner already
-    marks them seen the moment this request lands; we then wait on the same
-    per-partner signal add_transfer() sets, but in short slices rather than
-    one long await — checking request.is_disconnected() each slice so a
-    connection that actually dies mid-hold (client closed, process killed,
-    a clean interface teardown that sends FIN/RST) flips them to red within
-    one slice, instead of only on the next explicit contact or manual refresh.
-    A network path that vanishes with no FIN at all (silent WiFi drop) still
-    can't be detected this way — no amount of app-level polling reveals a
-    disconnect the OS itself was never told about — that's still caught by
-    the passive freshness fallback below in partner_status()."""
+    instead of waiting for its next short heartbeat. Whether this hold is
+    currently live is itself the server-role status signal (see
+    state.longpoll_connected) — a healthy client immediately reopens a new
+    hold the instant one ends, so a gap longer than LONGPOLL_GRACE_SEC means
+    the pipe is actually down, independent of whether the connection failure
+    was ever cleanly signaled. request.is_disconnected() is still checked
+    each slice as a faster path for the cases that *do* get a clean signal
+    (client closed, process killed)."""
     partner = _require_partner(request)
-    timeout = max(30, min(timeout, 3600))
+    timeout = max(10, min(timeout, 3600))
+    state.mark_longpoll_start(partner["id"])
 
-    if state.get_transfers_for_device(partner["device_id"]):
-        return {"work": True}
-
-    ev = state.get_signal_event(partner["id"])
-    ev.clear()
-    slice_secs = 5
-    elapsed = 0.0
-    while elapsed < timeout:
-        if await request.is_disconnected():
-            if partner.get("reachable") is not False:
-                partner["reachable"] = False
-                state._save_partners()
-                status = state.partner_status(partner)
-                asyncio.create_task(state.broadcast("partner_active", {"id": partner["id"], "status": status}))
-            return {"work": False}
-        this_slice = min(slice_secs, timeout - elapsed)
-        try:
-            await asyncio.wait_for(ev.wait(), timeout=this_slice)
+    try:
+        if state.get_transfers_for_device(partner["device_id"]):
             return {"work": True}
-        except asyncio.TimeoutError:
-            elapsed += this_slice
-    return {"work": False}
+
+        ev = state.get_signal_event(partner["id"])
+        ev.clear()
+        slice_secs = 5
+        elapsed = 0.0
+        while elapsed < timeout:
+            if await request.is_disconnected():
+                if partner.get("reachable") is not False:
+                    partner["reachable"] = False
+                    state._save_partners()
+                    status = state.partner_status(partner)
+                    asyncio.create_task(state.broadcast("partner_active", {"id": partner["id"], "status": status}))
+                return {"work": False}
+            this_slice = min(slice_secs, timeout - elapsed)
+            try:
+                await asyncio.wait_for(ev.wait(), timeout=this_slice)
+                return {"work": True}
+            except asyncio.TimeoutError:
+                elapsed += this_slice
+        return {"work": False}
+    finally:
+        state.mark_longpoll_end(partner["id"])
+        asyncio.create_task(_recheck_partner_soon(partner["id"]))
 
 
 @app.get("/api/peer/check")

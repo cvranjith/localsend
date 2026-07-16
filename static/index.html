@@ -69,9 +69,13 @@
   }
   .partner-item:hover { border-color: var(--accent); }
   .partner-item:active { opacity: .85; }
-  .status-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
+  .status-dot {
+    width: 10px; height: 10px; border-radius: 50%; background: var(--muted); flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center; line-height: 1;
+  }
   .status-dot.online  { background: var(--success); box-shadow: 0 0 6px var(--success); }
   .status-dot.offline { background: var(--error); }
+  .status-dot.cloud   { background: transparent; width: 14px; height: 14px; font-size: 12px; }
   .status-dot.scanning { background: var(--accent); animation: dot-pulse 0.9s ease-in-out infinite; }
   @keyframes dot-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
   .partner-info { flex: 1; min-width: 0; }
@@ -81,8 +85,6 @@
   .mode-badge { font-size: 11px; padding: 1px 6px; border-radius: 4px; font-weight: 600; flex-shrink: 0; }
   .mode-server { color: var(--recv-color); background: rgba(78,201,97,.15); }
   .mode-client { color: var(--muted); background: var(--border); }
-  .route-cloud { color: var(--accent); background: rgba(77,155,255,.15); }
-  .route-auto { color: var(--warning); background: rgba(224,168,50,.15); }
 
   /* Single overflow menu at the end of the row — replaces what used to be a
      cluster of small buttons crammed inside the row's own click target. */
@@ -299,8 +301,7 @@
     <h3>Add Partner</h3>
     <div class="form-row">
       <label>IP Address</label>
-      <input id="ap-ip" placeholder="192.168.1.42" />
-      <small style="color:var(--muted);">Or a wildcard like 192.168.1.* to broadcast for it instead of dialing a fixed address — enables subnet scanning to relocate it later too</small>
+      <input id="ap-ip" placeholder="192.168.1.42 or 192.168.1.*" />
     </div>
     <div class="form-row">
       <label>Port</label>
@@ -321,8 +322,7 @@
     <h3>Edit <span id="ep-name"></span></h3>
     <div class="form-row">
       <label>IP Address</label>
-      <input id="ep-ip" />
-      <small style="color:var(--muted);">A fixed address (e.g. 192.168.1.42) is dialed directly, never scanned for. A wildcard (e.g. 192.168.1.*) enables subnet scanning to relocate it if it goes quiet.</small>
+      <input id="ep-ip" placeholder="192.168.1.42 or 192.168.1.*" />
     </div>
     <div class="form-row">
       <label>Port</label>
@@ -331,9 +331,9 @@
     <div class="form-row">
       <label>Connection Route</label>
       <select id="ep-route">
-        <option value="local">Local &mdash; always direct, no automatic fallback</option>
-        <option value="auto">Auto &mdash; direct when reachable, cloud when it isn't</option>
-        <option value="cloud">Cloud &mdash; always use the cloud route</option>
+        <option value="local">Local</option>
+        <option value="auto">Auto</option>
+        <option value="cloud">Cloud</option>
       </select>
     </div>
     <div id="ep-error" style="color:var(--error);font-size:12px;min-height:16px;"></div>
@@ -393,7 +393,7 @@
     </div>
     <div class="form-row" id="cfg-longpoll-row">
       <label>Long-poll Timeout (seconds)</label>
-      <input id="cfg-longpoll" type="number" min="30" max="3600" />
+      <input id="cfg-longpoll" type="number" min="10" max="3600" />
     </div>
     <div class="modal-footer">
       <button class="btn btn-outline" onclick="closeModal('settings-modal')">Cancel</button>

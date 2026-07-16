@@ -15,7 +15,14 @@ LOG_FILE = DATA_DIR / "log.json"
 
 LOG_RETENTION_DAYS = 7
 DEFAULT_PING_FREQUENCY_SEC = 60
-DEFAULT_LONG_POLL_TIMEOUT_SEC = 600
+# Short on purpose: a healthy long-poll cycles (ends, reconnects) at least this
+# often, and that cycling — not last_ping_at freshness — is what server-role
+# status now trusts. A long timeout would mean a perfectly healthy multi-minute
+# hold looks "stale" long before it naturally ends, and a genuinely dead
+# connection with no clean close (silent WiFi drop) wouldn't be caught until
+# this many seconds pass regardless — so shorter directly means faster detection.
+DEFAULT_LONG_POLL_TIMEOUT_SEC = 20
+LONGPOLL_GRACE_SEC = 8  # buffer for the normal end-of-cycle -> reconnect gap
 
 
 class AppState:
@@ -32,6 +39,8 @@ class AppState:
         self.active_tasks: dict[str, asyncio.Task] = {}      # transfer_id → task
         self.longpoll_tasks: dict[str, asyncio.Task] = {}    # partner_id → our long-poll loop against them
         self._partner_signals: dict[str, asyncio.Event] = {}  # partner_id → "new work queued" wake-up
+        self._longpoll_live: dict[str, bool] = {}    # partner_id → a /api/peer/wait request from them is currently being held open
+        self._longpoll_last_seen: dict[str, float] = {}  # partner_id → epoch time the last hold started or ended
 
     # ── config ────────────────────────────────────────────────────────────────
 
@@ -43,6 +52,11 @@ class AppState:
         self.config.setdefault("receive_dir", str(Path.home() / "Downloads" / "localsend-recv"))
         self.config.setdefault("role", "server")  # "server" = never pings out; "client" = pings its partners
         self.config.setdefault("ping_frequency_sec", DEFAULT_PING_FREQUENCY_SEC)
+        # The old default (600s) meant a healthy long-poll hold looked stale
+        # long before it ended — a config still sitting at that untouched old
+        # default gets tightened too, not just fresh installs.
+        if self.config.get("long_poll_timeout_sec") == 600:
+            self.config["long_poll_timeout_sec"] = DEFAULT_LONG_POLL_TIMEOUT_SEC
         self.config.setdefault("long_poll_timeout_sec", DEFAULT_LONG_POLL_TIMEOUT_SEC)
         self.device_id: str = self.config["device_id"]
         self._save_config()
@@ -133,6 +147,29 @@ class AppState:
         self._save_partners()
         return self.partner_status(partner)
 
+    # ── long-poll liveness (server-role's real-time "is the pipe up" signal) ───
+
+    def mark_longpoll_start(self, partner_id: str):
+        self._longpoll_live[partner_id] = True
+        self._longpoll_last_seen[partner_id] = time.time()
+
+    def mark_longpoll_end(self, partner_id: str):
+        self._longpoll_live[partner_id] = False
+        self._longpoll_last_seen[partner_id] = time.time()
+
+    def longpoll_connected(self, partner_id: str) -> bool:
+        """True while a /api/peer/wait hold from this partner is currently open,
+        or ended recently enough that it's within the normal reconnect gap. A
+        healthy client-role peer holds one of these continuously — it ends and
+        immediately re-opens a new one — so this is a direct, real-time proxy
+        for "the pipe is up right now", unlike last_ping_at (which only ticks
+        at the *start* of a hold that can run for a while before naturally
+        cycling, so a perfectly healthy hold would otherwise look stale)."""
+        if self._longpoll_live.get(partner_id):
+            return True
+        last = self._longpoll_last_seen.get(partner_id)
+        return bool(last and (time.time() - last) <= LONGPOLL_GRACE_SEC)
+
     def partner_status(self, partner: dict) -> str:
         """green/red/grey, computed from persisted state only — the UI just paints this,
         it never re-derives freshness from its own timers."""
@@ -143,14 +180,17 @@ class AppState:
             # We are the one pinging; reachable reflects the outcome of our most recent attempt.
             return "green" if partner.get("reachable") else "red"
         # We are the server: partner is a client that must ping *us*. An explicit probe
-        # (manual refresh) that just failed is definitive — don't wait out the grace
-        # window in that case. Otherwise judge freshness by its own declared ping
-        # frequency (with slack for jitter/one missed beat).
+        # (manual refresh) that just failed is definitive — don't wait out anything else.
         if partner.get("reachable") is False:
             return "red"
-        freq = partner.get("ping_frequency_sec") or DEFAULT_PING_FREQUENCY_SEC
-        grace = max(freq * 2, freq + 30)
-        return "green" if (time.time() - last_ping_at) <= grace else "red"
+        if self.longpoll_connected(partner["id"]):
+            return "green"
+        # Bootstrap grace: last_ping_at was just set (e.g. the initial hello
+        # that registered them) but their first long-poll hasn't landed yet —
+        # give it the same short window before calling it down.
+        if (time.time() - last_ping_at) <= LONGPOLL_GRACE_SEC:
+            return "green"
+        return "red"
 
     def remove_partner(self, partner_id: str):
         self.partners = [p for p in self.partners if p["id"] != partner_id]
