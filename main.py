@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
+from cloud import send_via_cloud, receive_via_cloud
 from state import AppState, STAGING_DIR
 
 
@@ -641,6 +642,45 @@ async def receive_from_partner_endpoint(partner_id: str):
     if not partner:
         raise HTTPException(404, "Partner not found")
     asyncio.create_task(receive_from_partner(partner))
+    return {"ok": True}
+
+
+# ── cloud fallback (manual, for when the direct pipe is down) ────────────────
+# Bundles files into a zip and drops it in a shared OCI bucket (see cloud.py)
+# instead of streaming peer-to-peer. Manually triggered from the UI only —
+# never kicked off automatically.
+
+
+class CloudSendRequest(BaseModel):
+    partner_id: str
+    files: list[dict]  # [{file_id, name, path, size}]
+
+
+@app.post("/api/cloud/send")
+async def cloud_send(body: CloudSendRequest):
+    partner = state.get_partner(body.partner_id)
+    if not partner:
+        raise HTTPException(404, "Partner not found")
+    if not partner.get("device_id"):
+        raise HTTPException(400, "Partner has no known device ID yet — contact them directly at least once first")
+    if not body.files:
+        raise HTTPException(400, "No files to send")
+
+    transfer_id = str(uuid.uuid4())
+    file_list = [
+        {"path": f["path"], "name": f["name"], "size": f["size"], "origin": f.get("origin", "staged")}
+        for f in body.files
+    ]
+    asyncio.create_task(send_via_cloud(state, partner, file_list, transfer_id))
+    return {"transfer_id": transfer_id, "ok": True}
+
+
+@app.post("/api/cloud/receive/{partner_id}")
+async def cloud_receive_endpoint(partner_id: str):
+    partner = state.get_partner(partner_id)
+    if not partner:
+        raise HTTPException(404, "Partner not found")
+    asyncio.create_task(receive_via_cloud(state, partner))
     return {"ok": True}
 
 

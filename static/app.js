@@ -148,6 +148,12 @@ function partnerHTML(p) {
     ? `<span class="mode-badge mode-server">${modeLabel}</span>`
     : `<span class="mode-badge mode-client">${modeLabel}</span>`;
 
+  // Direct pipe looks down — offer the cloud fallback instead. Hidden the rest
+  // of the time to keep the normal (direct) path visually uncluttered.
+  const cloudBtn = p.status !== "green"
+    ? `<button class="btn btn-sm btn-outline" onclick="event.stopPropagation();cloudSyncPartner('${p.id}')" title="Direct connection looks down — send staged files via cloud object storage instead, and check for anything they've left you there">&#9729;</button>`
+    : "";
+
   return `
   <div class="partner-item" id="partner-${p.id}" onclick="syncPartner('${p.id}')" title="Click to sync: ping (scanning to relocate it if unreachable) + send staged files + check for incoming">
     <div class="status-dot ${dotCls}" id="dot-${p.id}" title="${dotTip}"></div>
@@ -155,6 +161,7 @@ function partnerHTML(p) {
       <div class="partner-name">${esc(p.name)} ${modeBadge}</div>
       <div class="partner-addr">${esc(p.ip)}:${p.port}</div>
     </div>
+    ${cloudBtn}
     <button class="btn btn-sm btn-danger" onclick="event.stopPropagation();removePartner('${p.id}')" title="Remove partner">&#10005;</button>
   </div>`;
 }
@@ -629,6 +636,31 @@ async function receiveFromPartner(partnerId) {
   } catch (e) {
     alert(`Receive failed: ${e.message}`);
   }
+}
+
+// ── cloud fallback (manual — direct pipe is down) ────────────────────────────
+async function cloudSendToPartner(partnerId) {
+  if (!stagedFiles.length) return;
+  try {
+    await POST("/api/cloud/send", { partner_id: partnerId, files: stagedFiles });
+    stagedFiles = [];
+    renderStaged();
+  } catch (e) {
+    alert(`Cloud send failed: ${e.message}`);
+  }
+}
+
+async function cloudReceiveFromPartner(partnerId) {
+  try {
+    await POST(`/api/cloud/receive/${partnerId}`);
+  } catch (e) {
+    alert(`Cloud receive failed: ${e.message}`);
+  }
+}
+
+async function cloudSyncPartner(partnerId) {
+  if (stagedFiles.length) await cloudSendToPartner(partnerId);
+  await cloudReceiveFromPartner(partnerId);
 }
 
 async function abortTransfer(transferId) {
