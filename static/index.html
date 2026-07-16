@@ -54,8 +54,6 @@
   /* ── form ── */
   .form-row { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
   .form-row label { font-size: 13px; color: var(--muted); }
-  .checkbox-row { flex-direction: row !important; align-items: flex-start; gap: 8px !important; cursor: pointer; }
-  .checkbox-row input { width: auto; margin-top: 2px; }
   .form-inline { display: flex; gap: 6px; }
   .form-inline input { flex: 1; }
   input, select { background: var(--card); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 8px 12px; font-size: 14px; width: 100%; }
@@ -83,11 +81,18 @@
   .mode-badge { font-size: 11px; padding: 1px 6px; border-radius: 4px; font-weight: 600; flex-shrink: 0; }
   .mode-server { color: var(--recv-color); background: rgba(78,201,97,.15); }
   .mode-client { color: var(--muted); background: var(--border); }
+  .route-cloud { color: var(--accent); background: rgba(77,155,255,.15); }
+  .route-auto { color: var(--warning); background: rgba(224,168,50,.15); }
 
-  /* Action buttons (cloud fallback, remove) live in their own visually fenced-off
-     zone at the end of the row, so it's clear they're separate click targets from
-     the row's own "click anywhere to sync" behavior, not a button nested inside it. */
-  .partner-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; padding-left: 10px; margin-left: 2px; border-left: 1px solid var(--border); }
+  /* Single overflow menu at the end of the row — replaces what used to be a
+     cluster of small buttons crammed inside the row's own click target. */
+  .btn-menu {
+    background: none; border: 1px solid var(--border); color: var(--muted);
+    border-radius: 6px; width: 28px; height: 28px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 16px; line-height: 1; cursor: pointer;
+  }
+  .btn-menu:hover { border-color: var(--accent); color: var(--accent); }
 
   /* ── drop zone ── */
   #dropzone {
@@ -309,6 +314,37 @@
   </div>
 </div>
 
+<!-- Edit Partner Modal -->
+<div class="modal-backdrop" id="edit-partner-modal">
+  <div class="modal">
+    <h3>Edit <span id="ep-name"></span></h3>
+    <div class="form-row">
+      <label>IP Address</label>
+      <input id="ep-ip" />
+    </div>
+    <div class="form-row">
+      <label>Port</label>
+      <input id="ep-port" />
+    </div>
+    <div class="form-row">
+      <label>Connection Route</label>
+      <select id="ep-route">
+        <option value="local">Local &mdash; always direct, no automatic fallback</option>
+        <option value="auto">Auto &mdash; direct when reachable, cloud when it isn't</option>
+        <option value="cloud">Cloud &mdash; always use the cloud route</option>
+      </select>
+    </div>
+    <div id="ep-error" style="color:var(--error);font-size:12px;min-height:16px;"></div>
+    <div class="modal-footer" style="justify-content:space-between;">
+      <button class="btn btn-danger" onclick="removePartnerFromEdit()">Remove Partner</button>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-outline" onclick="closeModal('edit-partner-modal')">Cancel</button>
+        <button class="btn btn-primary" onclick="saveEditPartner()">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Browse Server Files Modal -->
 <div class="modal-backdrop" id="browse-modal">
   <div class="modal" style="width:480px;">
@@ -356,12 +392,6 @@
     <div class="form-row" id="cfg-longpoll-row">
       <label>Long-poll Timeout (seconds)</label>
       <input id="cfg-longpoll" type="number" min="30" max="3600" />
-    </div>
-    <div class="form-row">
-      <label class="checkbox-row">
-        <input type="checkbox" id="cfg-auto-cloud" />
-        Auto cloud fallback &mdash; route a sync through the cloud when a partner isn't green, switch back to direct once it is
-      </label>
     </div>
     <div class="modal-footer">
       <button class="btn btn-outline" onclick="closeModal('settings-modal')">Cancel</button>

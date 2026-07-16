@@ -252,7 +252,6 @@ class ConfigUpdate(BaseModel):
     role: Optional[str] = None
     ping_frequency_sec: Optional[int] = None
     long_poll_timeout_sec: Optional[int] = None
-    auto_cloud_fallback: Optional[bool] = None
 
 
 @app.put("/api/config")
@@ -304,13 +303,20 @@ async def add_partner(body: AddPartner):
     return {**partner, "status": state.partner_status(partner)}
 
 
-class ForceCloudUpdate(BaseModel):
-    force_cloud: bool
+class PartnerEdit(BaseModel):
+    ip: Optional[str] = None
+    port: Optional[int] = None
+    route: Optional[str] = None  # "local" | "auto" | "cloud"
 
 
-@app.put("/api/partners/{partner_id}/force-cloud")
-async def set_partner_force_cloud(partner_id: str, body: ForceCloudUpdate):
-    partner = state.set_force_cloud(partner_id, body.force_cloud)
+@app.put("/api/partners/{partner_id}")
+async def edit_partner(partner_id: str, body: PartnerEdit):
+    if body.route is not None and body.route not in ("local", "auto", "cloud"):
+        raise HTTPException(400, "route must be 'local', 'auto', or 'cloud'")
+    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not updates:
+        raise HTTPException(400, "Nothing to update")
+    partner = state.update_partner(partner_id, updates)
     if not partner:
         raise HTTPException(404, "Partner not found")
     await state.broadcast("partners_update", state.partners)

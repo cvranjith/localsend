@@ -103,7 +103,6 @@ function openSettings() {
   document.getElementById("cfg-role").value = config.role || "server";
   document.getElementById("cfg-freq").value = config.ping_frequency_sec || 60;
   document.getElementById("cfg-longpoll").value = config.long_poll_timeout_sec || 600;
-  document.getElementById("cfg-auto-cloud").checked = !!config.auto_cloud_fallback;
   onRoleChange();
   openModal("settings-modal");
 }
@@ -122,7 +121,6 @@ async function saveSettings() {
       role: document.getElementById("cfg-role").value,
       ping_frequency_sec: Math.max(10, parseInt(document.getElementById("cfg-freq").value) || 60),
       long_poll_timeout_sec: Math.max(30, parseInt(document.getElementById("cfg-longpoll").value) || 600),
-      auto_cloud_fallback: document.getElementById("cfg-auto-cloud").checked,
     }) };
     renderConfig();
     renderPartners();
@@ -144,6 +142,7 @@ function renderPartners() {
 
 function partnerHTML(p) {
   const [dotCls, dotTip] = dotFor(p.status);
+  const route = p.route || "local";
 
   // Fixed at the time the partner was added — never flips with a transient
   // reachability blip (that's what the status dot is for).
@@ -152,33 +151,29 @@ function partnerHTML(p) {
     ? `<span class="mode-badge mode-client">client</span>`
     : `<span class="mode-badge mode-server">server</span>`;
 
-  // One-off manual cloud sync — only shown when direct looks down, for a quick
-  // "just this once" push without changing any lasting setting.
-  const cloudBtn = !p.force_cloud && p.status !== "green"
-    ? `<button class="btn btn-sm btn-outline" onclick="event.stopPropagation();cloudSyncPartner('${p.id}')" title="Direct connection looks down — send staged files via cloud object storage instead, and check for anything they've left you there">&#9729; Cloud</button>`
+  // Only one route is ever active — shown as a badge next to the name when
+  // it's not the default "local", so clicking the row already does the right
+  // thing (direct, auto-fallback, or straight to cloud) with no extra button.
+  const routeBadge = route === "cloud"
+    ? `<span class="mode-badge route-cloud" title="Always uses the cloud route">&#9729; cloud</span>`
+    : route === "auto"
+    ? `<span class="mode-badge route-auto" title="Direct when reachable, falls back to cloud automatically">auto</span>`
     : "";
 
-  // Durable per-partner override — always take the cloud route for this
-  // partner regardless of live status, until toggled off again.
-  const forceCloudBtn = `
-    <button class="btn btn-sm ${p.force_cloud ? "btn-primary" : "btn-outline"}"
-      onclick="event.stopPropagation();toggleForceCloud('${p.id}', ${p.force_cloud ? "false" : "true"})"
-      title="${p.force_cloud ? "Always using the cloud route for this partner — click to go back to direct" : "Force this partner to always use the cloud route, even while direct is up"}">
-      &#9729; ${p.force_cloud ? "Forced" : "Force"}
-    </button>`;
+  const syncTip = route === "cloud"
+    ? "Click to sync via the cloud route"
+    : route === "auto"
+    ? "Click to sync: ping + send/receive direct, automatically falling back to cloud if it's down"
+    : "Click to sync: ping (scanning to relocate it if unreachable) + send staged files + check for incoming";
 
   return `
-  <div class="partner-item" id="partner-${p.id}" onclick="syncPartner('${p.id}')" title="Click to sync: ping (scanning to relocate it if unreachable) + send staged files + check for incoming">
+  <div class="partner-item" id="partner-${p.id}" onclick="syncPartner('${p.id}')" title="${syncTip}">
     <div class="status-dot ${dotCls}" id="dot-${p.id}" title="${dotTip}"></div>
     <div class="partner-info">
-      <div class="partner-name">${esc(p.name)} ${modeBadge}</div>
+      <div class="partner-name">${esc(p.name)} ${modeBadge} ${routeBadge}</div>
       <div class="partner-addr">${esc(p.ip)}:${p.port}</div>
     </div>
-    <div class="partner-actions">
-      ${cloudBtn}
-      ${forceCloudBtn}
-      <button class="btn btn-sm btn-danger" onclick="event.stopPropagation();removePartner('${p.id}')" title="Remove partner">&#10005;</button>
-    </div>
+    <button class="btn-menu" onclick="event.stopPropagation();openPartnerEdit('${p.id}')" title="Edit partner">&#8942;</button>
   </div>`;
 }
 
@@ -226,22 +221,48 @@ async function submitAddPartner() {
   }
 }
 
-async function removePartner(id) {
-  if (!confirm("Remove this partner?")) return;
-  await DEL(`/api/partners/${id}`);
-  partners = partners.filter(p => p.id !== id);
-  renderPartners();
+// ── edit partner (IP/port/route, plus remove) ─────────────────────────────────
+let editingPartnerId = null;
+
+function openPartnerEdit(id) {
+  const p = partners.find(x => x.id === id);
+  if (!p) return;
+  editingPartnerId = id;
+  document.getElementById("ep-name").textContent = p.name;
+  document.getElementById("ep-ip").value = p.ip;
+  document.getElementById("ep-port").value = p.port;
+  document.getElementById("ep-route").value = p.route || "local";
+  document.getElementById("ep-error").textContent = "";
+  openModal("edit-partner-modal");
 }
 
-async function toggleForceCloud(id, value) {
+async function saveEditPartner() {
+  if (!editingPartnerId) return;
+  const ip = document.getElementById("ep-ip").value.trim();
+  const port = parseInt(document.getElementById("ep-port").value) || 0;
+  const route = document.getElementById("ep-route").value;
+  const errEl = document.getElementById("ep-error");
+  if (!ip || !port) { errEl.textContent = "IP address and port are required"; return; }
+
   try {
-    const updated = await PUT(`/api/partners/${id}/force-cloud`, { force_cloud: value });
-    const p = partners.find(x => x.id === id);
+    const updated = await PUT(`/api/partners/${editingPartnerId}`, { ip, port, route });
+    const p = partners.find(x => x.id === editingPartnerId);
     if (p) Object.assign(p, updated);
     renderPartners();
+    closeModal("edit-partner-modal");
   } catch (e) {
-    alert(`Couldn't update: ${e.message}`);
+    errEl.textContent = e.message;
   }
+}
+
+async function removePartnerFromEdit() {
+  if (!editingPartnerId) return;
+  if (!confirm("Remove this partner?")) return;
+  await DEL(`/api/partners/${editingPartnerId}`);
+  partners = partners.filter(p => p.id !== editingPartnerId);
+  renderPartners();
+  closeModal("edit-partner-modal");
+  editingPartnerId = null;
 }
 
 // ── SSE ───────────────────────────────────────────────────────────────────────
@@ -609,10 +630,11 @@ function addBrowseSelection() {
 // ── sync (ping + send + receive combined) ────────────────────────────────────
 async function syncPartner(partnerId) {
   const initial = partners.find(x => x.id === partnerId);
+  const route = (initial && initial.route) || "local";
 
-  // Manual override — always take the cloud route for this partner, skip
-  // probing direct connectivity at all.
-  if (initial && initial.force_cloud) {
+  // Route is fixed to "cloud" — always take that path, skip probing direct
+  // connectivity at all.
+  if (route === "cloud") {
     return cloudSyncPartner(partnerId);
   }
 
@@ -641,12 +663,12 @@ async function syncPartner(partnerId) {
     }
   }
 
-  // Opt-in auto-fallback: once the connectivity check above shows this partner
-  // isn't green, route through the cloud instead — automatically switches back
-  // to direct on its own next time, since this re-checks live status every call.
+  // Route "auto": once the connectivity check above shows this partner isn't
+  // green, route through the cloud instead — switches back to direct on its
+  // own next time, since this re-checks live status every call.
   const current = partners.find(x => x.id === partnerId);
-  if (config.auto_cloud_fallback && current && current.status !== "green") {
-    console.log(`[sync] auto cloud fallback for ${current.name} (status: ${current.status})`);
+  if (route === "auto" && current && current.status !== "green") {
+    console.log(`[sync] auto route falling back to cloud for ${current.name} (status: ${current.status})`);
     return cloudSyncPartner(partnerId);
   }
 
