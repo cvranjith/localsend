@@ -143,10 +143,12 @@ function renderPartners() {
 function partnerHTML(p) {
   const [dotCls, dotTip] = dotFor(p.status);
 
-  const modeLabel = p.reachable ? "server" : "client";
-  const modeBadge = p.reachable
-    ? `<span class="mode-badge mode-server">${modeLabel}</span>`
-    : `<span class="mode-badge mode-client">${modeLabel}</span>`;
+  // Fixed at the time the partner was added — never flips with a transient
+  // reachability blip (that's what the status dot is for).
+  const mode = p.mode || (p.reachable ? "server" : "client");
+  const modeBadge = mode === "client"
+    ? `<span class="mode-badge mode-client">client</span>`
+    : `<span class="mode-badge mode-server">server</span>`;
 
   // Direct pipe looks down — offer the cloud fallback instead. Hidden the rest
   // of the time to keep the normal (direct) path visually uncluttered.

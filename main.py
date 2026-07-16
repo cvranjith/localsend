@@ -296,7 +296,7 @@ async def add_partner(body: AddPartner):
     if remote_device_id and state.get_partner_by_device_id(remote_device_id):
         raise HTTPException(409, "Partner already added (device already known)")
 
-    partner = state.add_partner(remote_name, body.ip, body.port, remote_device_id, reachable=True)
+    partner = state.add_partner(remote_name, body.ip, body.port, remote_device_id, reachable=True, mode="server")
     _touch(partner)
     _sync_longpoll_tasks()
     await state.broadcast("partners_update", state.partners)
@@ -428,8 +428,11 @@ async def discover_partner(partner_id: str):
 
 @app.get("/api/partners/ping")
 async def ping_partners():
-    """Actively pings every partner. Only meaningful for a client (a server never
-    calls this on its own — it just waits to be pinged)."""
+    """Actively pings every partner right now. A client does this on its own
+    heartbeat schedule; a server never calls this automatically (it just waits
+    to be pinged) but the UI's manual refresh button hits this regardless of
+    role, so a stale "green" can be forced to re-check instead of waiting out
+    the passive freshness window."""
     changed = False
     async with httpx.AsyncClient(timeout=3) as client:
         async def ping_one(p):
@@ -776,7 +779,7 @@ async def peer_hello(
         if not caller and state.config.get("role") == "server" and name and port and freq:
             client_ip = request.client.host if request.client else None
             if client_ip:
-                caller = state.add_partner(name, client_ip, port, caller_id, reachable=False)
+                caller = state.add_partner(name, client_ip, port, caller_id, reachable=False, mode="client")
                 await state.broadcast("partners_update", state.partners)
 
         if caller:

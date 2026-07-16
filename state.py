@@ -63,11 +63,25 @@ class AppState:
         self.partners: list[dict] = (
             json.loads(PARTNERS_FILE.read_text()) if PARTNERS_FILE.exists() else []
         )
+        # Backfill "mode" for partner records saved before it existed. Only a
+        # client-role pinger ever supplies ping_frequency_sec (see peer_hello),
+        # so its presence reliably tells apart the two ways a partner record
+        # can come to exist, without depending on the (volatile) reachable flag.
+        changed = False
+        for p in self.partners:
+            if "mode" not in p:
+                p["mode"] = "client" if p.get("ping_frequency_sec") else "server"
+                changed = True
+        if changed:
+            self._save_partners()
 
     def _save_partners(self):
         PARTNERS_FILE.write_text(json.dumps(self.partners, indent=2))
 
-    def add_partner(self, name: str, ip: str, port: int, remote_device_id: str, reachable: bool = False) -> dict:
+    def add_partner(
+        self, name: str, ip: str, port: int, remote_device_id: str,
+        reachable: bool = False, mode: str = "server",
+    ) -> dict:
         p = {
             "id": str(uuid.uuid4()),
             "name": name,
@@ -75,6 +89,7 @@ class AppState:
             "port": port,
             "device_id": remote_device_id,
             "reachable": reachable,  # True = we can push; False = pull-only
+            "mode": mode,  # "server" (we dialed into them) or "client" (they dialed into us) — fixed at creation, not touched by later reachability checks
             "last_ping_at": None,          # epoch seconds, persisted so status survives a restart
             "ping_frequency_sec": None,    # declared by the partner itself when it pings us as a client
         }
@@ -85,6 +100,7 @@ class AppState:
     def mark_seen(self, partner: dict, ping_frequency_sec: int | None = None) -> str:
         """Record a successful contact from/to `partner` and return its freshly computed status."""
         partner["last_ping_at"] = time.time()
+        partner["reachable"] = True  # successful contact just now is direct proof of reachability
         if ping_frequency_sec:
             partner["ping_frequency_sec"] = ping_frequency_sec
         self._save_partners()
@@ -99,8 +115,12 @@ class AppState:
         if self.config.get("role") == "client":
             # We are the one pinging; reachable reflects the outcome of our most recent attempt.
             return "green" if partner.get("reachable") else "red"
-        # We are the server: partner is a client that must ping *us* — judge freshness by
-        # its own declared frequency (with slack for jitter/one missed beat).
+        # We are the server: partner is a client that must ping *us*. An explicit probe
+        # (manual refresh) that just failed is definitive — don't wait out the grace
+        # window in that case. Otherwise judge freshness by its own declared ping
+        # frequency (with slack for jitter/one missed beat).
+        if partner.get("reachable") is False:
+            return "red"
         freq = partner.get("ping_frequency_sec") or DEFAULT_PING_FREQUENCY_SEC
         grace = max(freq * 2, freq + 30)
         return "green" if (time.time() - last_ping_at) <= grace else "red"
