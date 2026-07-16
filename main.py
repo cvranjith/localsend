@@ -136,10 +136,26 @@ async def _udp_discover(target_port: int, timeout: float = 1.5) -> list[tuple[di
 #    work notification, instead of waiting for its next short heartbeat) ───────
 
 
+def _set_reachable(partner: dict, online: bool):
+    """Update our own (client-role) view of a partner's reachability and push
+    it live, same pattern as the active-probe endpoints (ping_partner(s))."""
+    if partner.get("reachable") == online:
+        return
+    partner["reachable"] = online
+    state._save_partners()
+    status = state.partner_status(partner)
+    asyncio.create_task(state.broadcast("partner_active", {"id": partner["id"], "status": status}))
+
+
 async def _longpoll_loop(partner_id: str):
     """Runs for the lifetime of a client→server pairing. Holds a GET open on the
     partner; an immediate response means either new work or a dropped connection —
-    either way we just reconnect. No server-side tracking beyond one wake event."""
+    either way we just reconnect. This loop is a backend asyncio task, not a
+    browser timer — unlike the JS heartbeat (setInterval, which browsers throttle
+    hard on a backgrounded tab, sometimes to once an hour), it keeps running and
+    retrying every 5s regardless of whether any tab is even open, so it's a much
+    faster and more reliable "is the partner actually reachable" signal than
+    waiting on the next heartbeat tick to notice and update reachable."""
     while True:
         if state.config.get("role") != "client":
             return  # role changed away from client — stop
@@ -157,7 +173,10 @@ async def _longpoll_loop(partner_id: str):
                     params={"timeout": timeout},
                     headers={"X-Device-ID": state.device_id},
                 )
-            if r.status_code == 200 and r.json().get("work"):
+            if r.status_code != 200:
+                raise httpx.HTTPStatusError(f"HTTP {r.status_code}", request=r.request, response=r)
+            _set_reachable(partner, True)
+            if r.json().get("work"):
                 _log(f"longpoll: {partner['name']} signaled work — pulling")
                 # Await, don't fire-and-forget: the outbox entry isn't cleared until
                 # this finishes, so reconnecting immediately would just re-poll into
@@ -168,6 +187,7 @@ async def _longpoll_loop(partner_id: str):
             raise
         except Exception as e:
             _log(f"longpoll: {partner['name']} connection lost ({e}) — retrying in 5s")
+            _set_reachable(partner, False)
             await asyncio.sleep(5)
 
 
