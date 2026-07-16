@@ -160,17 +160,24 @@ function partnerHTML(p) {
     ? `<span class="mode-badge route-auto" title="Direct when reachable, falls back to cloud automatically">auto</span>`
     : "";
 
+  // Subnet scanning is opt-in (wildcard IP, e.g. 192.168.1.*) — flagged here
+  // so it's clear this partner's address is allowed to roam within the LAN.
+  const scanBadge = p.allow_scan
+    ? `<span class="mode-badge route-auto" title="Scanning enabled — will probe the LAN to relocate this partner if its IP changes">scan</span>`
+    : "";
+
+  const scanNote = p.allow_scan ? " (scanning to relocate it if unreachable)" : "";
   const syncTip = route === "cloud"
     ? "Click to sync via the cloud route"
     : route === "auto"
-    ? "Click to sync: ping + send/receive direct, automatically falling back to cloud if it's down"
-    : "Click to sync: ping (scanning to relocate it if unreachable) + send staged files + check for incoming";
+    ? `Click to sync: ping + send/receive direct, automatically falling back to cloud if it's down${scanNote}`
+    : `Click to sync: ping${scanNote} + send staged files + check for incoming`;
 
   return `
   <div class="partner-item" id="partner-${p.id}" onclick="syncPartner('${p.id}')" title="${syncTip}">
     <div class="status-dot ${dotCls}" id="dot-${p.id}" title="${dotTip}"></div>
     <div class="partner-info">
-      <div class="partner-name">${esc(p.name)} ${modeBadge} ${routeBadge}</div>
+      <div class="partner-name">${esc(p.name)} ${modeBadge} ${routeBadge} ${scanBadge}</div>
       <div class="partner-addr">${esc(p.ip)}:${p.port}</div>
     </div>
     <button class="btn-menu" onclick="event.stopPropagation();openPartnerEdit('${p.id}')" title="Edit partner">&#8942;</button>
@@ -205,7 +212,9 @@ async function submitAddPartner() {
   btn.disabled = true;
   btn.textContent = "Saving…";
   errEl.textContent  = "";
-  statEl.textContent = "Trying to reach partner…";
+  statEl.textContent = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\*$/.test(ip)
+    ? "Broadcasting for it on that port…"
+    : "Trying to reach partner…";
 
   try {
     const p = await POST("/api/partners", { ip, port });
@@ -229,7 +238,11 @@ function openPartnerEdit(id) {
   if (!p) return;
   editingPartnerId = id;
   document.getElementById("ep-name").textContent = p.name;
-  document.getElementById("ep-ip").value = p.ip;
+  // Show the wildcard form when scanning is on, so the field reflects intent
+  // (roam within this /24) rather than just whatever address was last resolved.
+  document.getElementById("ep-ip").value = p.allow_scan
+    ? p.ip.split(".").slice(0, 3).join(".") + ".*"
+    : p.ip;
   document.getElementById("ep-port").value = p.port;
   document.getElementById("ep-route").value = p.route || "local";
   document.getElementById("ep-error").textContent = "";

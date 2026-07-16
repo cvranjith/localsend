@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 import socket
 import subprocess
 import urllib.parse
@@ -210,6 +211,13 @@ async def startup():
         pass  # UDP port unavailable — discovery replies just won't work, HTTP server is unaffected
     _sync_longpoll_tasks()
 
+    # Fire-and-forget: try to relocate any partner explicitly configured for
+    # subnet scanning (a wildcard IP), so a roamed device is found promptly
+    # after a restart instead of waiting for the next failed sync attempt.
+    for p in state.partners:
+        if p.get("allow_scan"):
+            asyncio.create_task(_discover_partner(p))
+
 
 # ── SSE ───────────────────────────────────────────────────────────────────────
 
@@ -274,6 +282,11 @@ async def list_partners():
     return [{**p, "status": state.partner_status(p)} for p in state.partners]
 
 
+# A trailing ".*" last octet (e.g. "192.168.1.*") is the explicit opt-in for
+# subnet scanning — a bare IP never triggers it (see _discover_partner below).
+_WILDCARD_IP_RE = re.compile(r"^(\d{1,3}\.\d{1,3}\.\d{1,3})\.\*$")
+
+
 class AddPartner(BaseModel):
     ip: str
     port: int
@@ -281,14 +294,38 @@ class AddPartner(BaseModel):
 
 @app.post("/api/partners")
 async def add_partner(body: AddPartner):
-    if state.get_partner_by_ip_port(body.ip, body.port):
-        raise HTTPException(409, f"Partner at {body.ip}:{body.port} already exists")
+    ip = body.ip.strip()
 
-    async with httpx.AsyncClient(timeout=5) as client:
-        remote = await _hello_check(client, body.ip, body.port)
+    if _WILDCARD_IP_RE.match(ip):
+        # No concrete address to dial yet — broadcast for it instead, and
+        # require an unambiguous single reply since there's no name/device_id
+        # to match against on a first-ever add.
+        replies = await _udp_discover(body.port)
+        candidates = {}
+        for remote, addr in replies:
+            if remote.get("type") != "localsend_hello":
+                continue
+            candidates[remote.get("device_id") or addr[0]] = {
+                "ip": addr[0], "port": remote.get("port", body.port), **remote,
+            }
+        if not candidates:
+            raise HTTPException(400, f"No device answered a broadcast on port {body.port} — make sure it's running and reachable")
+        if len(candidates) > 1:
+            names = ", ".join(f"{c.get('name')} ({c['ip']})" for c in candidates.values())
+            raise HTTPException(400, f"Found more than one device on port {body.port} ({names}) — add by its exact IP instead so there's no ambiguity")
+        remote = next(iter(candidates.values()))
+        resolved_ip, resolved_port = remote["ip"], remote["port"]
+        allow_scan = True
+    else:
+        async with httpx.AsyncClient(timeout=5) as client:
+            remote = await _hello_check(client, ip, body.port)
+        if not remote:
+            raise HTTPException(400, "Couldn't reach that address — check the IP, port, and that it's running LocalSend")
+        resolved_ip, resolved_port = ip, body.port
+        allow_scan = False
 
-    if not remote:
-        raise HTTPException(400, "Couldn't reach that address — check the IP, port, and that it's running LocalSend")
+    if state.get_partner_by_ip_port(resolved_ip, resolved_port):
+        raise HTTPException(409, f"Partner at {resolved_ip}:{resolved_port} already exists")
 
     remote_device_id = remote.get("device_id")
     remote_name = remote.get("name") or "unknown"
@@ -296,7 +333,10 @@ async def add_partner(body: AddPartner):
     if remote_device_id and state.get_partner_by_device_id(remote_device_id):
         raise HTTPException(409, "Partner already added (device already known)")
 
-    partner = state.add_partner(remote_name, body.ip, body.port, remote_device_id, reachable=True, mode="server")
+    partner = state.add_partner(
+        remote_name, resolved_ip, resolved_port, remote_device_id,
+        reachable=True, mode="server", allow_scan=allow_scan,
+    )
     _touch(partner)
     _sync_longpoll_tasks()
     await state.broadcast("partners_update", state.partners)
@@ -313,9 +353,24 @@ class PartnerEdit(BaseModel):
 async def edit_partner(partner_id: str, body: PartnerEdit):
     if body.route is not None and body.route not in ("local", "auto", "cloud"):
         raise HTTPException(400, "route must be 'local', 'auto', or 'cloud'")
-    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+
+    updates = {}
+    if body.ip is not None:
+        ip = body.ip.strip()
+        if _WILDCARD_IP_RE.match(ip):
+            # Toggle scanning on; keep the last-known concrete IP untouched —
+            # something still has to be dialed until the next scan updates it.
+            updates["allow_scan"] = True
+        else:
+            updates["ip"] = ip
+            updates["allow_scan"] = False
+    if body.port is not None:
+        updates["port"] = body.port
+    if body.route is not None:
+        updates["route"] = body.route
     if not updates:
         raise HTTPException(400, "Nothing to update")
+
     partner = state.update_partner(partner_id, updates)
     if not partner:
         raise HTTPException(404, "Partner not found")
@@ -382,15 +437,13 @@ async def _scan_subnet(port: int, matches, start_octet: int) -> Optional[dict]:
     return found.get("hit")
 
 
-@app.post("/api/partners/{partner_id}/discover")
-async def discover_partner(partner_id: str):
-    """Re-locate a partner whose IP changed: recheck its last known address, try a
-    UDP broadcast on its known port, then fall back to actually probing hosts on
-    the local subnet (nearest to the last known IP first) if that finds nothing."""
-    partner = state.get_partner(partner_id)
-    if not partner:
-        raise HTTPException(404, "Partner not found")
-
+async def _discover_partner(partner: dict) -> dict:
+    """Re-locate a partner whose IP may have changed: recheck its last known
+    address, then try a UDP broadcast on its known port. Only if this partner
+    has scanning explicitly enabled (a wildcard IP like 192.168.1.* was
+    configured for it — see _WILDCARD_IP_RE) do we fall back further to
+    actually probing every host on the local subnet; otherwise a partner with
+    a fixed IP that doesn't answer is just reported unreachable, not scanned."""
     _log(f"discover: starting for '{partner['name']}', last known {partner['ip']}:{partner['port']}")
 
     target_device_id = partner.get("device_id")
@@ -421,13 +474,15 @@ async def discover_partner(partner_id: str):
                 hit = {"ip": addr[0], "port": remote.get("port", partner["port"]), **remote}
                 break
 
-    # Last resort: actually probe hosts on the subnet, closest to the last known IP first
-    if not hit:
+    # Last resort: actually probe hosts on the subnet — only for partners explicitly opted in
+    if not hit and partner.get("allow_scan"):
         try:
             start_octet = int(partner["ip"].split(".")[-1])
         except ValueError:
             start_octet = 1
         hit = await _scan_subnet(partner["port"], matches, start_octet)
+    elif not hit:
+        _log(f"discover: scanning not enabled for '{partner['name']}' (no wildcard IP configured) — not probing the subnet")
 
     if not hit:
         _log(f"discover: gave up, could not locate '{partner['name']}'")
@@ -444,6 +499,14 @@ async def discover_partner(partner_id: str):
     _touch(partner)
     await state.broadcast("partners_update", state.partners)
     return {"found": True, "ip": hit["ip"], "port": hit["port"], "changed": changed}
+
+
+@app.post("/api/partners/{partner_id}/discover")
+async def discover_partner(partner_id: str):
+    partner = state.get_partner(partner_id)
+    if not partner:
+        raise HTTPException(404, "Partner not found")
+    return await _discover_partner(partner)
 
 
 @app.get("/api/partners/ping")

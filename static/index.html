@@ -299,7 +299,8 @@
     <h3>Add Partner</h3>
     <div class="form-row">
       <label>IP Address</label>
-      <input id="ap-ip" placeholder="192.168.1.x" />
+      <input id="ap-ip" placeholder="192.168.1.42" />
+      <small style="color:var(--muted);">Or a wildcard like 192.168.1.* to broadcast for it instead of dialing a fixed address — enables subnet scanning to relocate it later too</small>
     </div>
     <div class="form-row">
       <label>Port</label>
@@ -321,6 +322,7 @@
     <div class="form-row">
       <label>IP Address</label>
       <input id="ep-ip" />
+      <small style="color:var(--muted);">A fixed address (e.g. 192.168.1.42) is dialed directly, never scanned for. A wildcard (e.g. 192.168.1.*) enables subnet scanning to relocate it if it goes quiet.</small>
     </div>
     <div class="form-row">
       <label>Port</label>

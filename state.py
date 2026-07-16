@@ -82,6 +82,12 @@ class AppState:
             elif "force_cloud" in p:
                 p.pop("force_cloud", None)
                 changed = True
+            if "allow_scan" not in p:
+                # Subnet scanning used to run unconditionally for any unreachable
+                # partner; it's now opt-in only (a wildcard IP), so existing
+                # records default to off rather than silently keep scanning.
+                p["allow_scan"] = False
+                changed = True
         if changed:
             self._save_partners()
 
@@ -90,7 +96,7 @@ class AppState:
 
     def add_partner(
         self, name: str, ip: str, port: int, remote_device_id: str,
-        reachable: bool = False, mode: str = "server",
+        reachable: bool = False, mode: str = "server", allow_scan: bool = False,
     ) -> dict:
         p = {
             "id": str(uuid.uuid4()),
@@ -103,6 +109,7 @@ class AppState:
             "last_ping_at": None,          # epoch seconds, persisted so status survives a restart
             "ping_frequency_sec": None,    # declared by the partner itself when it pings us as a client
             "route": "local",  # "local" (always direct) | "auto" (direct, cloud fallback if down) | "cloud" (always cloud) — user-editable, only one active at a time
+            "allow_scan": allow_scan,  # explicit opt-in (wildcard IP, e.g. 192.168.1.*) for the last-resort full-subnet probe when unreachable
         }
         self.partners.append(p)
         self._save_partners()
