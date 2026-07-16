@@ -870,9 +870,17 @@ async def peer_receive_push(filename: str, request: Request):
 @app.get("/api/peer/wait")
 async def peer_wait(request: Request, timeout: int = 600):
     """Long-poll: a client holds this open on us for instant work notification
-    instead of waiting for its next short heartbeat. We do no extra bookkeeping —
-    _require_partner already marks them seen the moment this request lands, and
-    we just wait on the same per-partner signal add_transfer() already sets."""
+    instead of waiting for its next short heartbeat. _require_partner already
+    marks them seen the moment this request lands; we then wait on the same
+    per-partner signal add_transfer() sets, but in short slices rather than
+    one long await — checking request.is_disconnected() each slice so a
+    connection that actually dies mid-hold (client closed, process killed,
+    a clean interface teardown that sends FIN/RST) flips them to red within
+    one slice, instead of only on the next explicit contact or manual refresh.
+    A network path that vanishes with no FIN at all (silent WiFi drop) still
+    can't be detected this way — no amount of app-level polling reveals a
+    disconnect the OS itself was never told about — that's still caught by
+    the passive freshness fallback below in partner_status()."""
     partner = _require_partner(request)
     timeout = max(30, min(timeout, 3600))
 
@@ -881,11 +889,23 @@ async def peer_wait(request: Request, timeout: int = 600):
 
     ev = state.get_signal_event(partner["id"])
     ev.clear()
-    try:
-        await asyncio.wait_for(ev.wait(), timeout=timeout)
-        return {"work": True}
-    except asyncio.TimeoutError:
-        return {"work": False}
+    slice_secs = 5
+    elapsed = 0.0
+    while elapsed < timeout:
+        if await request.is_disconnected():
+            if partner.get("reachable") is not False:
+                partner["reachable"] = False
+                state._save_partners()
+                status = state.partner_status(partner)
+                asyncio.create_task(state.broadcast("partner_active", {"id": partner["id"], "status": status}))
+            return {"work": False}
+        this_slice = min(slice_secs, timeout - elapsed)
+        try:
+            await asyncio.wait_for(ev.wait(), timeout=this_slice)
+            return {"work": True}
+        except asyncio.TimeoutError:
+            elapsed += this_slice
+    return {"work": False}
 
 
 @app.get("/api/peer/check")

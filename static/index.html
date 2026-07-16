@@ -82,6 +82,11 @@
   .mode-server { color: var(--recv-color); background: rgba(78,201,97,.15); }
   .mode-client { color: var(--muted); background: var(--border); }
 
+  /* Action buttons (cloud fallback, remove) live in their own visually fenced-off
+     zone at the end of the row, so it's clear they're separate click targets from
+     the row's own "click anywhere to sync" behavior, not a button nested inside it. */
+  .partner-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; padding-left: 10px; margin-left: 2px; border-left: 1px solid var(--border); }
+
   /* ── drop zone ── */
   #dropzone {
     border: 2px dashed var(--border); border-radius: 10px; padding: 36px 24px;

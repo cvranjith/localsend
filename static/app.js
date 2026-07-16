@@ -153,7 +153,7 @@ function partnerHTML(p) {
   // Direct pipe looks down — offer the cloud fallback instead. Hidden the rest
   // of the time to keep the normal (direct) path visually uncluttered.
   const cloudBtn = p.status !== "green"
-    ? `<button class="btn btn-sm btn-outline" onclick="event.stopPropagation();cloudSyncPartner('${p.id}')" title="Direct connection looks down — send staged files via cloud object storage instead, and check for anything they've left you there">&#9729;</button>`
+    ? `<button class="btn btn-sm btn-outline" onclick="event.stopPropagation();cloudSyncPartner('${p.id}')" title="Direct connection looks down — send staged files via cloud object storage instead, and check for anything they've left you there">&#9729; Cloud</button>`
     : "";
 
   return `
@@ -163,8 +163,10 @@ function partnerHTML(p) {
       <div class="partner-name">${esc(p.name)} ${modeBadge}</div>
       <div class="partner-addr">${esc(p.ip)}:${p.port}</div>
     </div>
-    ${cloudBtn}
-    <button class="btn btn-sm btn-danger" onclick="event.stopPropagation();removePartner('${p.id}')" title="Remove partner">&#10005;</button>
+    <div class="partner-actions">
+      ${cloudBtn}
+      <button class="btn btn-sm btn-danger" onclick="event.stopPropagation();removePartner('${p.id}')" title="Remove partner">&#10005;</button>
+    </div>
   </div>`;
 }
 
