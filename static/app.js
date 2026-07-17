@@ -770,19 +770,45 @@ async function openFolder(path) {
 // Log-entry open helpers (path stored in logPaths by entry id)
 function openLogFile(id)   { const p = logPaths[id]; if (p) openFile(p); }
 function openLogFolder(id) { const p = logPaths[id]; if (p) openFolder(p); }
+function copyLogFile(id)   { const p = logPaths[id]; if (p) copyFileToClipboard(p, `logcopy-${id}`); }
 
 // Toast open helpers (path stored in toastStore by toast id)
 function openToastFile(id)   { const d = toastStore[id]; if (d?.saved_path) openFile(d.saved_path); }
 function openToastFolder(id) { const d = toastStore[id]; if (d?.saved_path) openFolder(d.saved_path); }
+function copyToastFile(id)   { const d = toastStore[id]; if (d?.saved_path) copyFileToClipboard(d.saved_path, `${id}-copybtn`); }
 
-// Toast clipboard copy / preview expand
-function copyToastText(id) {
-  const text = (toastStore[id] || {}).text_preview;
-  if (!text) return;
-  navigator.clipboard.writeText(text).then(() => {
-    const btn = document.getElementById(`${id}-copybtn`);
-    if (btn) { const orig = btn.textContent; btn.textContent = "Copied!"; setTimeout(() => { btn.textContent = orig; }, 1500); }
-  });
+// ── clipboard copy (received files: log entries + toasts) ─────────────────────
+// Text files copy their actual content; recognized image types copy real
+// image data (pasteable into e.g. an image editor or chat app); anything else
+// falls back to copying the file's path — browsers have no API for putting
+// an arbitrary local file onto the OS clipboard as a real, pasteable file.
+async function copyFileToClipboard(path, btnId) {
+  const btn = document.getElementById(btnId);
+  try {
+    const info = await GET(`/api/file/kind?path=${encodeURIComponent(path)}`);
+    if (info.kind === "text") {
+      await navigator.clipboard.writeText(info.content);
+      flashCopied(btn, "Copied!");
+    } else if (info.kind === "image") {
+      const resp = await fetch(`/api/file/raw?path=${encodeURIComponent(path)}`);
+      if (!resp.ok) throw new Error(await resp.text());
+      const blob = await resp.blob();
+      await navigator.clipboard.write([new ClipboardItem({ [blob.type || info.mime]: blob })]);
+      flashCopied(btn, "Copied!");
+    } else {
+      await navigator.clipboard.writeText(path);
+      flashCopied(btn, "Path copied!");
+    }
+  } catch (e) {
+    alert(`Copy failed: ${e.message}`);
+  }
+}
+
+function flashCopied(btn, label) {
+  if (!btn) return;
+  const orig = btn.textContent;
+  btn.textContent = label;
+  setTimeout(() => { btn.textContent = orig; }, 1500);
 }
 
 function expandToastPreview(id) {
@@ -839,15 +865,13 @@ function showToast(data) {
     ${preview ? `
     <div class="toast-preview">
       <div class="toast-preview-text" id="${id}-preview">${esc(previewShort)}${needsExpand ? "…" : ""}</div>
-      <div class="toast-preview-actions">
-        ${needsExpand ? `<button class="btn btn-sm btn-outline" id="${id}-expandbtn" onclick="expandToastPreview('${id}')">Show all</button>` : ""}
-        <button class="btn btn-sm btn-outline" id="${id}-copybtn" onclick="copyToastText('${id}')">Copy text</button>
-      </div>
+      ${needsExpand ? `<div class="toast-preview-actions"><button class="btn btn-sm btn-outline" id="${id}-expandbtn" onclick="expandToastPreview('${id}')">Show all</button></div>` : ""}
     </div>` : ""}
     <div class="toast-actions" style="margin-top:8px">
       ${data.saved_path ? `
       <button class="btn btn-sm btn-outline" id="${id}-openbtn" onclick="openToastFile('${id}')">Open</button>
-      <button class="btn btn-sm btn-outline" onclick="openToastFolder('${id}')">Show in Folder</button>` : ""}
+      <button class="btn btn-sm btn-outline" onclick="openToastFolder('${id}')">Show in Folder</button>
+      <button class="btn btn-sm btn-outline" id="${id}-copybtn" onclick="copyToastFile('${id}')">Copy</button>` : ""}
       <span class="toast-timer" id="${id}-timer">${countdown}s</span>
       <button class="btn btn-sm btn-danger" onclick="dismissToast('${id}')">&#10005;</button>
     </div>`;
@@ -975,7 +999,8 @@ function logItemHTML(e) {
 
   const openBtns = (!isSent && !isErr && e.path) ? `
     <button class="log-open-btn" onclick="event.stopPropagation();openLogFile('${e.id}')" title="Open file">&#128194;</button>
-    <button class="log-open-btn" onclick="event.stopPropagation();openLogFolder('${e.id}')" title="Show in Finder">&#128193;</button>` : "";
+    <button class="log-open-btn" onclick="event.stopPropagation();openLogFolder('${e.id}')" title="Show in Finder">&#128193;</button>
+    <button class="log-open-btn" id="logcopy-${e.id}" onclick="event.stopPropagation();copyLogFile('${e.id}')" title="Copy to clipboard — text content, image data, or the file path for anything else">&#128203;</button>` : "";
 
   return `
   <div class="log-item ${cls}" id="log-${e.id}">

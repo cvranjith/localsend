@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import mimetypes
 import re
 import socket
 import subprocess
@@ -837,6 +838,45 @@ async def open_path(body: OpenRequest):
     else:
         subprocess.Popen(["open", str(p)])
     return {"ok": True}
+
+
+# ── clipboard copy (log entries, receive toasts) ───────────────────────────────
+# Browsers can only put text or a handful of image MIME types onto the OS
+# clipboard from a web page — there's no API for placing an arbitrary local
+# file there as a real, pasteable file. So: text files copy their content,
+# recognized image types copy actual image data, everything else falls back
+# to copying the file's path (the closest useful equivalent the platform allows).
+_CLIP_IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
+_CLIP_TEXT_MAX_BYTES = 2_000_000
+
+
+@app.get("/api/file/kind")
+async def file_kind(path: str):
+    p = Path(path)
+    if not p.exists() or not p.is_file():
+        raise HTTPException(404, "File not found")
+
+    mime, _ = mimetypes.guess_type(p.name)
+    if mime in _CLIP_IMAGE_TYPES:
+        return {"kind": "image", "mime": mime}
+
+    try:
+        if p.stat().st_size <= _CLIP_TEXT_MAX_BYTES:
+            raw = p.read_bytes()
+            if b"\x00" not in raw:
+                return {"kind": "text", "content": raw.decode("utf-8")}
+    except (UnicodeDecodeError, OSError):
+        pass
+
+    return {"kind": "other", "path": str(p)}
+
+
+@app.get("/api/file/raw")
+async def file_raw(path: str):
+    p = Path(path)
+    if not p.exists() or not p.is_file():
+        raise HTTPException(404, "File not found")
+    return FileResponse(p)
 
 
 # ── peer endpoints (machine-to-machine) ───────────────────────────────────────
