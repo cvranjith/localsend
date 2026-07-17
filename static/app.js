@@ -41,6 +41,13 @@ async function init() {
     startHeartbeat();
     startStatusRepaint();
     setInterval(retickLogTimes, 1000);
+    // Browsers throttle setInterval hard on a backgrounded tab (sometimes to
+    // once a minute or less), so a timestamp can sit stale well past when the
+    // 1s interval above would normally have caught it — re-tick immediately
+    // the moment the tab is looked at again, instead of waiting on that timer.
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) retickLogTimes();
+    });
     requestNotificationPermission();
   } catch (e) {
     console.error("Init failed", e);
