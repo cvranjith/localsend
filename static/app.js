@@ -40,6 +40,7 @@ async function init() {
     setupDropzone();
     startHeartbeat();
     startStatusRepaint();
+    setInterval(retickLogTimes, 1000);
   } catch (e) {
     console.error("Init failed", e);
   }
@@ -951,7 +952,7 @@ function logItemHTML(e) {
     <span class="log-partner">${esc(verb)} ${esc(e.partner_name)}</span>
     ${e.size ? `<span class="log-size">${fmtSize(e.size)}</span>` : ""}
     ${openBtns}
-    <span class="log-time">${fmtTime(e.ts)}</span>
+    <span class="log-time" data-ts="${esc(e.ts)}">${fmtTime(e.ts)}</span>
     <button class="log-del-btn" onclick="event.stopPropagation();deleteLogEntry('${e.id}')" title="Remove from log">&#10005;</button>
   </div>`;
 }
@@ -1001,10 +1002,20 @@ function fmtSize(b) {
 function fmtTime(iso) {
   if (!iso) return "";
   const d = new Date(iso + (iso.endsWith("Z") ? "" : "Z")), now = new Date(), diff = now - d;
-  if (diff < 60000)    return "just now";
-  if (diff < 3600000)  return Math.floor(diff/60000) + "m ago";
-  if (diff < 86400000) return d.toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
+  if (diff < 5000)      return "just now";
+  if (diff < 60000)     return Math.floor(diff/1000) + "s ago";
+  if (diff < 3600000)   return Math.floor(diff/60000) + "m ago";
+  if (diff < 86400000)  return d.toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
   return d.toLocaleDateString([], {month:"short", day:"numeric"});
+}
+
+// Re-ticks every visible log timestamp in place (no re-render) — sub-minute
+// entries need a fresh label every second, older ones only once a minute, but
+// it's cheap enough to just recompute all of them on one shared 1s interval.
+function retickLogTimes() {
+  document.querySelectorAll("#log-list .log-time[data-ts]").forEach(el => {
+    el.textContent = fmtTime(el.dataset.ts);
+  });
 }
 
 // ── start ─────────────────────────────────────────────────────────────────────
