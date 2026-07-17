@@ -6,6 +6,7 @@ import socket
 import subprocess
 import urllib.parse
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -35,7 +36,8 @@ logging.getLogger("uvicorn.access").addFilter(_QuietAccessFilter())
 
 
 def _log(msg: str):
-    print(f"[localsend] {msg}", flush=True)
+    ts = datetime.now().strftime("%H:%M:%S")
+    print(f"[{ts}] [localsend] {msg}", flush=True)
 
 
 async def _hello_check(client: httpx.AsyncClient, ip: str, port: int) -> Optional[dict]:
@@ -138,9 +140,12 @@ async def _udp_discover(target_port: int, timeout: float = 1.5) -> list[tuple[di
 
 def _set_reachable(partner: dict, online: bool):
     """Update our own (client-role) view of a partner's reachability and push
-    it live, same pattern as the active-probe endpoints (ping_partner(s))."""
+    it live, same pattern as the active-probe endpoints (ping_partner(s)). Only
+    logs on an actual transition, not every retry attempt — a clear marker for
+    when the pipe actually went down or came back, not just noise."""
     if partner.get("reachable") == online:
         return
+    _log(f"longpoll: {partner['name']} connection {'resumed' if online else 'lost'}")
     partner["reachable"] = online
     state._save_partners()
     status = state.partner_status(partner)
@@ -186,8 +191,9 @@ async def _longpoll_loop(partner_id: str):
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            _log(f"longpoll: {partner['name']} connection lost ({e}) — retrying in 5s")
-            _set_reachable(partner, False)
+            _set_reachable(partner, False)  # logs "connection lost" only on the actual transition
+            reason = str(e) or type(e).__name__  # some exceptions (e.g. a bare ConnectError) stringify to ""
+            _log(f"longpoll: {partner['name']} retrying in 5s ({reason})")
             await asyncio.sleep(5)
 
 
