@@ -41,6 +41,7 @@ async function init() {
     startHeartbeat();
     startStatusRepaint();
     setInterval(retickLogTimes, 1000);
+    requestNotificationPermission();
   } catch (e) {
     console.error("Init failed", e);
   }
@@ -358,6 +359,7 @@ function connectSSE() {
       completeTransferBar(key, `saved as ${data.saved_as}`);
       setTimeout(() => removeTransferBar(key), 3000);
       showToast(data);
+      notifyDesktop(data);
     }
     else if (type === "receive_error") {
       const key = `${data.transfer_id}:${data.filename}`;
@@ -783,6 +785,29 @@ function expandToastPreview(id) {
   if (el) el.textContent = text;
   const btn = document.getElementById(`${id}-expandbtn`);
   if (btn) btn.remove();
+}
+
+// ── desktop notifications ──────────────────────────────────────────────────────
+// A native OS notification, separate from the in-page toast — shows up even
+// when this tab isn't focused or visible. Requires a secure context (https,
+// or localhost/127.0.0.1) and the user having granted permission; silently
+// does nothing otherwise.
+function requestNotificationPermission() {
+  if (!("Notification" in window)) return;
+  if (Notification.permission === "default") {
+    Notification.requestPermission().catch(() => {});
+  }
+}
+
+function notifyDesktop(data) {
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  try {
+    const n = new Notification("File received", {
+      body: `${data.saved_as || data.filename} — from ${data.partner_name}`,
+      tag: `recv-${data.transfer_id}-${data.filename}`,
+    });
+    n.onclick = () => { window.focus(); n.close(); };
+  } catch { /* some platforms throw on unsupported notification options — safe to ignore */ }
 }
 
 // ── toasts ────────────────────────────────────────────────────────────────────
